@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTMX Email Client</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <!-- Load HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.10" xintegrity="sha384-D1Kt99CQgTfA6IgF3/BS/dftl/TqIyIRGRkmrO4C5YtT8mD20Fq/2QL7W8qYpM7W" crossorigin="anonymous"></script>
+    <style>
+        :root {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for a cleaner look */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: #4b5563; /* Gray-600 */
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #1f2937; /* Gray-800 */
+        }
+        /* Hide htmx indicator, as the load is instant here */
+        .htmx-indicator {
+            display: none;
+        }
+        .list-item:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 h-screen overflow-hidden">
+
+    <!-- HTMX Simulation Data -->
+    <script>
+        // Dummy data structure to simulate fetching email details from a server
+        // We now have 10 emails for better pagination simulation
+        const emailDetails = [
+            {
+                id: 1,
+                subject: "Project Status Update: Q4 Goals",
+                sender: "Jane Doe <jane.doe@corp.com>",
+                date: "Oct 15, 2025",
+                body: `<p class="text-gray-300">Hi Team,</p>
+                        <p class="mt-4 text-gray-300">I wanted to provide a quick update on our Q4 goals. The new design system migration is 90% complete, and we are on track to launch the new marketing site by Friday.</p>
+                        <p class="mt-4 text-gray-300">Please review the attached mockups (simulated) and provide feedback by end-of-day tomorrow. We can discuss any blockers during our stand-up.</p>
+                        <p class="mt-8 text-gray-300">Best,<br>Jane</p>`
+            },
+            {
+                id: 2,
+                subject: "Upcoming Holiday Schedule",
+                sender: "HR Department <hr@corp.com>",
+                date: "Oct 14, 2025",
+                body: `<p class="text-gray-300">All Employees,</p>
+                        <p class="mt-4 text-gray-300">The holiday schedule for the upcoming months is now finalized and available on the internal portal. This email is a reminder that the office will be closed on December 24th, 25th, and 31st, as well as January 1st.</p>
+                        <p class="mt-4 text-gray-300">If your role requires coverage on these dates, please coordinate with your manager immediately. If you have any questions, please contact HR directly.</p>
+                        <p class="mt-8 text-gray-300">Thank you,<br>HR Team</p>`
+            },
+            {
+                id: 3,
+                subject: "Quick Question Regarding the New Logo",
+                sender: "Mark Smith <mark.smith@design.io>",
+                date: "Oct 13, 2025",
+                body: `<p class="text-gray-300">Hi,</p>
+                        <p class="mt-4 text-gray-300">Could you confirm the HEX code for the dark blue in the new logo design? I want to ensure the website footer matches the brand guidelines exactly.</p>
+                        <p class="mt-4 text-gray-300">I believe it's #1E3A8A, but a confirmation would be great!</p>
+                        <p class="mt-8 text-gray-300">Thanks,<br>Mark</p>`
+            },
+            {
+                id: 4,
+                subject: "Reminder: PTO Request Deadline",
+                sender: "Jenny Wilson <jenny@corp.com>",
+                date: "Oct 12, 2025",
+                body: `<p class="text-gray-300">Team,</p>
+                        <p class="mt-4 text-gray-300">Just a friendly reminder that all Paid Time Off (PTO) requests for the first quarter must be submitted by the end of this week.</p>
+                        <p class="mt-8 text-gray-300">Cheers,<br>Jenny</p>`
+            },
+            {
+                id: 5,
+                subject: "Meeting Confirmation: Q1 Budget Review",
+                sender: "Finance Team <finance@corp.com>",
+                date: "Oct 12, 2025",
+                body: `<p class="text-gray-300">Dear Stakeholders,</p>
+                        <p class="mt-4 text-gray-300">This is a confirmation for our Q1 Budget Review meeting scheduled for 10/25 at 2:00 PM in Conference Room Beta. Please ensure you bring the necessary departmental reports.</p>
+                        <p class="mt-8 text-gray-300">Regards,<br>Finance Team</p>`
+            },
+            {
+                id: 6,
+                subject: "Your recent purchase has been shipped",
+                sender: "Shipping <no-reply@shop.com>",
+                date: "Oct 10, 2025",
+                body: `<p class="text-gray-300">Great news! Your order #90210 has been shipped and is expected to arrive within 3-5 business days. You can track your order using the link below (simulated).</p>`
+            },
+            {
+                id: 7,
+                subject: "Weekly Dev Sync Agenda",
+                sender: "Project Manager <pm@corp.com>",
+                date: "Oct 9, 2025",
+                body: `<p class="text-gray-300">Hi all,</p>
+                        <p class="mt-4 text-gray-300">Please review the agenda for our weekly sync. Key topics include deployment pipeline stability and reviewing the latest security audit findings.</p>
+                        <p class="mt-8 text-gray-300">Thanks!</p>`
+            },
+            {
+                id: 8,
+                subject: "New Policy Update: Remote Work",
+                sender: "HR Department <hr@corp.com>",
+                date: "Oct 9, 2025",
+                body: `<p class="text-gray-300">Attention:</p>
+                        <p class="mt-4 text-gray-300">Our remote work policy has been updated, allowing for two days per week remote. Full details are attached to this email.</p>`
+            },
+            {
+                id: 9,
+                subject: "Lunch options for tomorrow",
+                sender: "Michael <michael@corp.com>",
+                date: "Oct 8, 2025",
+                body: `<p class="text-gray-300">Hey, thinking of ordering Italian tomorrow. Let me know if you want to join the group order!</p>`
+            },
+            {
+                id: 10,
+                subject: "Your monthly service bill is ready",
+                sender: "Billing <billing@service.com>",
+                date: "Oct 8, 2025",
+                body: `<p class="text-gray-300">Your bill for the month of October is now available. Log in to your account to view the details.</p>`
+            },
+        ];
+
+        const EMAILS_PER_PAGE = 5;
+        let totalPages = Math.ceil(emailDetails.length / EMAILS_PER_PAGE);
+
+
+        // --- Simulation Functions ---
+
+        // This function simulates the server response for the detail pane
+        function getEmailDetailHTML(emailId) {
+            const email = emailDetails.find(e => e.id == emailId);
+            if (!email) return `<div class="p-8 text-center text-gray-500">Email not found.</div>`;
+
+            // HTML Structure that a server would return
+            return `
+                <div class="border-b border-gray-700 p-6 flex justify-between items-start">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white">${email.subject}</h2>
+                        <p class="text-sm text-gray-400 mt-1">From: <span class="text-white">${email.sender}</span></p>
+                    </div>
+                    <p class="text-sm text-gray-400 pt-1">${email.date}</p>
+                </div>
+                <div class="p-6 overflow-y-auto custom-scrollbar flex-grow bg-gray-800 text-lg">
+                    ${email.body}
+                </div>
+                <div class="p-4 border-t border-gray-700 flex space-x-3 bg-gray-700/50 flex-shrink-0">
+                    <button class="flex items-center space-x-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition duration-150 shadow-lg">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a2 2 0 012 2v6a2 2 0 01-2 2H3a2 2 0 01-2-2v-6a2 2 0 012-2zM7 10V5a2 2 0 012-2h6a2 2 0 012 2v5"></path></svg>
+                        <span>Reply</span>
+                    </button>
+                    <button class="flex items-center space-x-1 px-4 py-2 bg-gray-600 hover:bg-gray-500 text-gray-200 text-sm font-medium rounded-lg transition duration-150 shadow-lg">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 4h4M4 7l4-4M15 10l4-4M15 10l-4 4M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                        <span>Forward</span>
+                    </button>
+                </div>
+            `;
+        }
+
+        // Helper to generate a single list item HTML
+        function createListItemHTML(email) {
+            // Note: We include hx-get to show the intended HTMX link,
+            // but the click listener handles the content swap in this demo.
+            const isUnread = email.id <= 3; // Simulate unread status for first 3 emails
+            const senderName = email.sender.split('<')[0].trim();
+            const previewText = email.body.replace(/<[^>]*>?/gm, '').substring(0, 50);
+
+            return `
+                <div
+                    class="list-item email-list-item cursor-pointer p-4 border-b border-gray-700 hover:bg-gray-800 transition duration-200 border-l-4 border-l-transparent"
+                    data-email-id="${email.id}"
+                    hx-get="/api/email/${email.id}"
+                    hx-target="#detail-pane"
+                    hx-swap="innerHTML"
+                >
+                    <div class="flex justify-between items-center">
+                        <p class="${isUnread ? 'font-semibold text-white' : 'font-medium text-gray-300'} truncate">${senderName}</p>
+                        <span class="text-xs ${isUnread ? 'text-blue-400 font-bold' : 'text-gray-400'}">${email.date}</span>
+                    </div>
+                    <p class="text-sm ${isUnread ? 'font-medium text-gray-200' : 'text-gray-400'} truncate mt-1">${email.subject}</p>
+                    <p class="text-xs text-gray-500 truncate mt-1">${previewText}...</p>
+                </div>
+            `;
+        }
+
+        // Function to simulate the server returning a page of list items
+        function getEmailListPageHTML(page) {
+            const startIndex = (page - 1) * EMAILS_PER_PAGE;
+            const endIndex = startIndex + EMAILS_PER_PAGE;
+            const pageEmails = emailDetails.slice(startIndex, endIndex);
+
+            let html = '';
+            pageEmails.forEach(email => {
+                html += createListItemHTML(email);
+            });
+
+            const hasMore = endIndex < emailDetails.length;
+
+            if (hasMore) {
+                const nextPage = page + 1;
+                // The HTMX load-more trigger uses 'intersect once' for infinite scroll
+                // It swaps out the trigger element itself with the next batch of emails + the new trigger
+                html += `
+                    <div id="load-more-trigger"
+                        class="text-center p-4 text-gray-500 hover:text-blue-400 cursor-pointer border-t border-gray-700/50"
+                        hx-get="#page-${nextPage}"
+                        hx-trigger="intersect once"
+                        hx-swap="outerHTML"
+                        data-next-page="${nextPage}"
+                    >
+                        <span class="animate-pulse">Loading more emails (Page ${nextPage})...</span>
+                    </div>
+                `;
+            } else {
+                html += `<div class="text-center p-4 text-gray-600 border-t border-gray-700">End of Inbox.</div>`;
+            }
+
+            return html;
+        }
+
+        // --- HTMX Interception and Click Handlers ---
+
+        // Intercept the hx-get request for the infinite scroll trigger
+        document.addEventListener('htmx:beforeRequest', (evt) => {
+            const trigger = evt.detail.elt;
+            const isLoadMore = trigger.id === 'load-more-trigger';
+
+            if (isLoadMore) {
+                evt.preventDefault(); // Stop the real HTTP request
+                
+                const nextPage = parseInt(trigger.getAttribute('data-next-page'));
+                
+                if (nextPage <= totalPages) {
+                    // Simulate a network delay (500ms) for a more realistic feel
+                    setTimeout(() => {
+                        const newContent = getEmailListPageHTML(nextPage);
+                        
+                        // Manually replace the trigger with the new content (emails + new trigger/end message)
+                        trigger.outerHTML = newContent;
+                        
+                        // Re-bind click listeners to the newly added email elements
+                        updateClickListeners();
+                    }, 500); 
+                }
+            }
+        });
+
+        // Handler for clicking an email list item
+        function handleEmailClick(event) {
+            const detailPane = document.getElementById('detail-pane');
+            const listItems = document.querySelectorAll('.email-list-item');
+            const item = event.currentTarget;
+
+            // Remove active state from all
+            listItems.forEach(i => i.classList.remove('bg-gray-700/70', 'border-blue-500'));
+
+            // Add active state to clicked item
+            item.classList.add('bg-gray-700/70', 'border-blue-500');
+
+            const emailId = item.getAttribute('data-email-id');
+            const content = getEmailDetailHTML(emailId);
+
+            // Manually swap the content, simulating a successful hx-get request to the detail pane
+            detailPane.innerHTML = content;
+        }
+
+        // Binds click listeners to all current list items
+        function updateClickListeners() {
+            const listItems = document.querySelectorAll('.email-list-item');
+            listItems.forEach(item => {
+                // Prevent binding multiple times after subsequent loads
+                if (!item.hasAttribute('data-bound')) {
+                    item.addEventListener('click', handleEmailClick);
+                    item.setAttribute('data-bound', 'true');
+                }
+            });
+        }
+
+        // --- Initial Application Setup ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const detailPane = document.getElementById('detail-pane');
+            const emailListContainer = document.getElementById('email-list-container');
+
+            // 1. Initial Load of First Page (Simulating server-side rendering of the first page)
+            emailListContainer.innerHTML = getEmailListPageHTML(1);
+
+            // 2. Initial selection (Email 1)
+            const firstItem = document.querySelector('.email-list-item');
+            if(firstItem) {
+                const firstId = firstItem.getAttribute('data-email-id');
+                detailPane.innerHTML = getEmailDetailHTML(firstId);
+                firstItem.classList.add('bg-gray-700/70', 'border-blue-500');
+            } else {
+                // Fallback for empty list
+                detailPane.innerHTML = `<div class="flex-grow flex items-center justify-center text-gray-500">No emails found.</div>`;
+            }
+            
+            // 3. Bind listeners for the first set of loaded emails
+            updateClickListeners();
+        });
+    </script>
+
+    <!-- Main Application Grid -->
+    <div class="flex h-full">
+
+        <!-- 1. Sidebar (Navigation) -->
+        <aside class="w-16 md:w-64 bg-gray-800 border-r border-gray-700 p-4 flex-shrink-0 transition-all duration-300">
+            <div class="mb-8 hidden md:block">
+                <h1 class="text-xl font-extrabold text-blue-400">Mail Client</h1>
+            </div>
+            <nav>
+                <a href="#" class="flex items-center py-2 px-3 mb-2 rounded-lg bg-blue-600 hover:bg-blue-700 transition duration-150 text-white font-medium group">
+                    <svg class="w-6 h-6 md:mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                    <span class="hidden md:block">Compose</span>
+                </a>
+                <a href="#" class="flex items-center py-2 px-3 mb-2 rounded-lg hover:bg-gray-700 transition duration-150 text-gray-300 group">
+                    <svg class="w-6 h-6 md:mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-3"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M22 10h-4M22 10l-4 4M22 10l-4-4"></path></svg>
+                    <span class="hidden md:block">Inbox (3)</span>
+                </a>
+                <a href="#" class="flex items-center py-2 px-3 mb-2 rounded-lg hover:bg-gray-700 transition duration-150 text-gray-300 group">
+                    <svg class="w-6 h-6 md:mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 12h14M5 16h14"></path></svg>
+                    <span class="hidden md:block">Sent</span>
+                </a>
+                <a href="#" class="flex items-center py-2 px-3 mb-2 rounded-lg hover:bg-gray-700 transition duration-150 text-gray-300 group">
+                    <svg class="w-6 h-6 md:mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    <span class="hidden md:block">Trash</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- 2. Email List Pane -->
+        <main id="list-pane" class="w-full md:w-1/3 xl:w-1/4 flex-shrink-0 border-r border-gray-700 overflow-y-auto custom-scrollbar">
+            <header class="p-4 border-b border-gray-700 sticky top-0 bg-gray-900 z-10">
+                <h2 class="text-lg font-semibold text-white">Inbox (3 Unread)</h2>
+                <input type="text" placeholder="Search emails..." class="mt-2 w-full p-2 rounded-lg bg-gray-700 border border-gray-600 focus:ring-blue-500 focus:border-blue-500 text-sm placeholder-gray-400">
+            </header>
+
+            <!-- Email List Items Container (Target for infinite scroll swaps) -->
+            <div id="email-list-container">
+                <!--
+                    Initial list items and the 'load-more-trigger' will be injected here
+                    by the JavaScript on page load, simulating server-side rendering
+                    of the first page.
+                -->
+            </div>
+        </main>
+
+        <!-- 3. Email Detail Pane (The HTMX Target for content) -->
+        <section id="detail-pane" class="flex flex-col flex-grow bg-gray-800/50 shadow-inner h-full overflow-hidden">
+            <!-- Content will be swapped here by the htmx simulation -->
+            <div class="flex-grow flex items-center justify-center text-gray-500">
+                <div class="text-center p-8">
+                    <svg class="w-12 h-12 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                    <p class="text-lg font-medium">Select an email to view its contents</p>
+                    <p class="text-sm mt-1">Click any item on the left to load the details instantly.</p>
+                </div>
+            </div>
+        </section>
+
+    </div>
+</body>
+</html>
+
