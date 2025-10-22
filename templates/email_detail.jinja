@@ -1,0 +1,20 @@
+        <div class="border-b border-gray-700 p-6 flex justify-between items-start">
+            <div>
+                <h2 class="text-2xl font-bold text-white">{{email_subject}}</h2>
+                <p class="text-sm text-gray-400 mt-1">From: <span class="text-white">{{email_sender}}</span></p>
+            </div>
+            <p class="text-sm text-gray-400 pt-1">{{email_date}}</p>
+        </div>
+        <div class="p-6 overflow-y-auto custom-scrollbar flex-grow bg-gray-800 text-lg">
+            {{email_body|safe}}
+        </div>
+        <div class="p-4 border-t border-gray-700 flex space-x-3 bg-gray-700/50 flex-shrink-0">
+            <button class="flex items-center space-x-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition duration-150 shadow-lg">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a2 2 0 012 2v6a2 2 0 01-2 2H3a2 2 0 01-2-2v-6a2 2 0 012-2zM7 10V5a2 2 0 012-2h6a2 2 0 012 2v5"></path></svg>
+                <span>Reply</span>
+            </button>
+            <button class="flex items-center space-x-1 px-4 py-2 bg-gray-600 hover:bg-gray-500 text-gray-200 text-sm font-medium rounded-lg transition duration-150 shadow-lg">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 4h4M4 7l4-4M15 10l4-4M15 10l-4 4M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                <span>Forward</span>
+            </button>
+        </div>

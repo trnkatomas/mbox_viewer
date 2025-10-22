@@ -3,13 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HTMX Email Client (Production)</title>
+    <title>MBox Viewer</title>
     <!-- 
         These links now point to the '/static' directory served by FastAPI, 
         and the files (output.css and bundle.js) are created by the Dockerfile's builder stage.
     -->
-    <link href="/static/output.css" rel="stylesheet">
-    <script src="/static/bundle.js"></script>
+    <!--link href="/static/output.css" rel="stylesheet">
+    <script src="/static/bundle.js"></script-->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <!-- Load HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.10" xintegrity="sha384-D1Kt99CQgTfA6IgF3/BS/dftl/TqIyIRGRkmrO4C5YtT8mD20Fq/2QL7W8qYpM7W" crossorigin="anonymous"></script>
+
     <style>
         /* Custom scrollbar and font styles for a consistent dark mode look */
         :root { font-family: 'Inter', sans-serif; }
@@ -27,7 +33,7 @@
         <!-- 1. Sidebar (Navigation) -->
         <aside class="w-16 md:w-64 bg-gray-800 border-r border-gray-700 p-4 flex-shrink-0 transition-all duration-300">
             <div class="mb-8 hidden md:block">
-                <h1 class="text-xl font-extrabold text-blue-400">Mail Client</h1>
+                <h1 class="text-xl font-extrabold text-blue-400">MBox Viewer</h1>
             </div>
             <nav>
                 <a href="#" class="flex items-center py-2 px-3 mb-2 rounded-lg bg-blue-600 hover:bg-blue-700 transition duration-150 text-white font-medium group">

@@ -308,6 +308,97 @@
             // 3. Bind listeners for the first set of loaded emails
             updateClickListeners();
         });
+
+        /**
+         * Frontend logic for handling interactive search filter badges.
+         * This function runs whenever the search input changes.
+         */
+        function handleSearchInput(inputElement) {
+            const query = inputElement.value.toLowerCase();
+            const badgeContainer = document.getElementById('search-badges');
+            
+            // Define the keywords and their corresponding badge HTML
+            const filterKeywords = {
+                'subject:': 'subject:',
+                'from:': 'from:',
+            };
+
+            let badgesHtml = '';
+            let foundKeyword = null;
+
+            // Check if any keyword is present
+            for (const [keyword, label] of Object.entries(filterKeywords)) {
+                if (query.includes(keyword)) {
+                    foundKeyword = keyword;
+                    // Generate the badge HTML
+                    badgesHtml = `
+                        <span 
+                            id="active-badge"
+                            class="inline-flex items-center rounded-lg bg-gray-700 px-3 py-1 text-xs font-medium text-gray-300 cursor-pointer transition duration-150 hover:bg-gray-600"
+                            data-filter-keyword="${keyword}"
+                            onclick="applyFilterBadge(this, '${keyword}', '${inputElement.id}')"
+                        >
+                            <span class="mr-1">${label}</span>
+                            <span class="text-gray-400 font-normal">Click to apply filter</span>
+                        </span>
+                    `;
+                    break; // Stop after finding the first one (for simplicity)
+                }
+            }
+
+            // Update the badge container visibility and content
+            if (badgesHtml && !query.startsWith('[')) { // Don't show the interactive badge if a filter is already locked
+                badgeContainer.innerHTML = badgesHtml;
+                badgeContainer.classList.remove('hidden');
+            } else {
+                badgeContainer.innerHTML = '';
+                badgeContainer.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Applies the filter when the user clicks the detected badge.
+         * This simulates locking the filter mode by structuring the input text.
+         */
+        function applyFilterBadge(badgeElement, keyword, inputId) {
+            const inputElement = document.getElementById(inputId);
+            const query = inputElement.value.toLowerCase();
+            
+            // Find the index of the keyword and isolate the search text (query part)
+            const keywordIndex = query.indexOf(keyword);
+            let searchText = '';
+
+            if (keywordIndex !== -1) {
+                // Get the text that comes after the keyword, then trim to ensure only relevant text is kept
+                searchText = query.substring(keywordIndex + keyword.length).trim();
+            }
+
+            // Clear the input and set the new structured filter value
+            // This structured format is a hint to the user/backend that a filter is active
+            const filterLabel = keyword.toUpperCase().replace(':', '');
+            inputElement.value = `[${filterLabel}]: ${searchText}`;
+            
+            // Re-run the input handler to hide the old interactive badge
+            document.getElementById('search-badges').classList.add('hidden'); 
+            
+            // In a full application, you would now trigger the HTMX search request
+            // inputElement.dispatchEvent(new Event('input')); // This would trigger hx-trigger="input"
+            console.log(`Filter Applied: ${inputElement.value}`);
+        }
+
+        /**
+         * Removes the locked filter badge and resets the search input.
+         */
+        function removeFilterBadge(inputId) {
+            const inputElement = document.getElementById(inputId);
+            inputElement.value = '';
+            document.getElementById('search-badges').classList.add('hidden');
+            // Re-focus the input
+            inputElement.focus();
+            // Re-run the input handler to ensure the badges are reset
+            handleSearchInput(inputElement);
+        }
+
     </script>
 
     <!-- Main Application Grid -->
@@ -342,7 +433,21 @@
         <main id="list-pane" class="w-full md:w-1/3 xl:w-1/4 flex-shrink-0 border-r border-gray-700 overflow-y-auto custom-scrollbar">
             <header class="p-4 border-b border-gray-700 sticky top-0 bg-gray-900 z-10">
                 <h2 class="text-lg font-semibold text-white">Inbox (3 Unread)</h2>
-                <input type="text" placeholder="Search emails..." class="mt-2 w-full p-2 rounded-lg bg-gray-700 border border-gray-600 focus:ring-blue-500 focus:border-blue-500 text-sm placeholder-gray-400">
+                <!-- Search Input Container - Now relative for badge positioning -->
+                <div class="mt-2 relative">
+                    <input 
+                        type="text" 
+                        id="search-input"
+                        placeholder="Search emails (e.g. subject: or from:)" 
+                        class="w-full p-2 rounded-lg bg-gray-700 border border-gray-600 focus:ring-blue-500 focus:border-blue-500 text-sm placeholder-gray-400"
+                        oninput="handleSearchInput(this)"
+                    >
+                    <!-- Badge Container - Hidden by default, shows when keyword is typed -->
+                    <!-- This container positions the badge over the input text when triggered -->
+                    <div id="search-badges" class="absolute left-2 top-1/2 -translate-y-1/2 flex items-center hidden">
+                        <!-- Badge HTML is dynamically inserted here -->
+                    </div>
+                </div>
             </header>
 
             <!-- Email List Items Container (Target for infinite scroll swaps) -->

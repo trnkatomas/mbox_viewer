@@ -1,0 +1,14 @@
+    <div
+        class="list-item email-list-item cursor-pointer p-4 border-b border-gray-700 hover:bg-gray-800 transition duration-200 border-l-4 border-l-transparent"
+        hx-get="/api/email/{{email_id}}"
+        hx-target="#detail-pane"
+        hx-swap="innerHTML"
+        hx-indicator="#loading-indicator"
+    >
+        <div class="flex justify-between items-center">
+            <p class="{'font-semibold text-white' if is_unread else 'font-medium text-gray-300'} truncate">{{sender}}</p>
+            <span class="text-xs {'text-blue-400 font-bold' if is_unread else 'text-gray-400'}">{{email_date}}</span>
+        </div>
+        <p class="text-sm {'font-medium text-gray-200' if is_unread else 'text-gray-400'} truncate mt-1">{{email_subject}}</p>
+        <p class="text-xs text-gray-500 truncate mt-1">{{preview_text}}...</p>
+    </div>
