@@ -1,5 +1,6 @@
 import email
 from email.policy import default
+from readabilipy import simple_json_from_html_string
 
 import chromadb
 import duckdb
@@ -21,11 +22,16 @@ EMAIL_DETAILS = [
     },
 ]
 
+mboxfilename = "/Users/tomastrnka/Downloads/email_sample.mbox"
+# mboxfilename = '/Users/tomastrnka/Downloads/bigger_example.mbox'
+
 
 class MboxReader:
     def __init__(self, filename):
         self.handle = open(filename, "rb")
         assert self.handle.readline().startswith(b"From ")
+        # move the position in file back to zero
+        self.handle.seek(0)
 
     def __enter__(self):
         return self
@@ -38,22 +44,33 @@ class MboxReader:
 
     def __next__(self):
         lines = []
-        line_start_counter = 0
-        line_end_counter = 0
+        line_counter = 0
+        bytes_start_counter = 0
+        bytes_end_counter = 0
         while True:
             line = self.handle.readline()
-            if line == b"" or line.startswith(b"From "):
+            if line == b"" or line.startswith(b"From ") and line_counter > 0:
                 yield email.message_from_bytes(b"".join(lines), policy=default), (
-                    line_start_counter,
-                    line_end_counter,
+                    bytes_start_counter,
+                    bytes_end_counter,
                 )
-                line_start_counter = line_end_counter
+                bytes_start_counter = bytes_end_counter
+                bytes_end_counter += len(line)
                 if line == b"":
                     break
-                lines = []
+                lines = [line]
                 continue
             lines.append(line)
-            line_end_counter += 1
+            line_counter += 1
+            bytes_end_counter += len(line)
+
+
+def to_string(_content):
+    if isinstance(_content, (bytes, bytearray)):
+        string_content = _content.decode("ascii", errors="ignore")
+    else:
+        string_content = _content
+    return string_content
 
 
 def load_email_db(db_name="emails.db"):
@@ -75,8 +92,27 @@ def get_email_count(db):
         return 0
 
 
-def get_email_content():
-    pass
+def get_email_content(email_start, email_end):
+    with open(mboxfilename, 'rb') as infile:
+        infile.seek(email_start)
+        data = infile.read(email_end - email_start)
+        parsed_email = email.message_from_bytes(data, policy=default)
+        content = ''
+        try:
+            if len(list(parsed_email.iter_parts())) > 0:
+                for part in parsed_email.iter_parts():
+                    if is_attachment := part.get('Content-Disposition') and 'attachment' in is_attachment:
+                        continue
+                    current_content = to_string(part.get_content())
+                    content += current_content
+            else:
+                content = to_string(parsed_email.get_content())
+        except Exception as e:
+            print(e)
+        for a in parsed_email.iter_attachments():
+            # TODO return attachments, generate new email block for getting the attachments from the source file
+            print(f'attachment: {a.get_filename()}')
+        return content
 
 
 def get_email_list(db, criteria=None):
@@ -110,15 +146,14 @@ def process(drop_previous_table=False):
     import numpy as np
     import tqdm
     from dateparser import parse
-    from readabilipy import simple_json_from_html_string
+
     from sentence_transformers import CrossEncoder
 
     # DBs initialization
     # chroma_client = chromadb.Client()
     chroma_client = chromadb.PersistentClient(path="emails.chromadb")
     emails_collection = chroma_client.get_or_create_collection(name="emails")
-    # mboxfilename = "/Users/tomastrnka/Downloads/email_sample.mbox"
-    mboxfilename = '/Users/tomastrnka/Downloads/bigger_example.mbox'
+
 
     sha = sha256()
     BUF_SIZE = 65536
@@ -152,13 +187,6 @@ def process(drop_previous_table=False):
         " email_line_end integer)"
     )
     con.close()
-
-    def to_string(_content):
-        if isinstance(_content, (bytes, bytearray)):
-            string_content = _content.decode("ascii", errors="ignore")
-        else:
-            string_content = _content
-        return string_content
 
     with duckdb.connect("emails.db") as con:
         with MboxReader(mboxfilename) as mbox:
@@ -215,10 +243,11 @@ def process(drop_previous_table=False):
                     data_to_insert[:12],
                 )
 
-    # check that the DB has been filled in
-    con.sql(
-        "select subject, sum(has_attachment>0), count(*) as cnt from emails group by subject order by cnt desc limit 10"
-    )
+        # check that the DB has been filled in
+        res = con.sql(
+            "select subject, sum(has_attachment>0), count(*) as cnt from emails group by subject order by cnt desc limit 3"
+        )
+        print(res.df())
 
     def query_collection(collection, query):
         # Query the results

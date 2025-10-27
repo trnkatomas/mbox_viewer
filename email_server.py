@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from email_utils import (
     EMAIL_DETAILS,
     get_email_count,
+    get_email_content,
     get_email_list,
     get_one_email,
     load_email_content_search,
@@ -63,14 +64,14 @@ def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0):
     return output
 
 
-def create_detail_fragment(email):
+def create_detail_fragment(email_meta, email_content):
     """Generates the HTML for the email detail pane."""
     email_detail_template = templates.get_template("email_detail.jinja")
     output = email_detail_template.render(
-        email_subject=email["subject"],
-        email_sender=email["from_email"],
-        email_date=email["date"],
-        email_body=email["excerpt"],
+        email_subject=email_meta["subject"],
+        email_sender=email_meta["from_email"],
+        email_date=email_meta["date"],
+        email_body=email_content,
     )
     return output
 
@@ -118,12 +119,14 @@ async def email_list(page: int = Query(1, ge=1)):
 async def email_detail(email_id: str):
     """HTMX route to load the detail pane content."""
 
-    email = get_one_email(db_connections["duckdb"], email_id).to_dict(orient="records")
-    if isinstance(email, list) and email:
-        email = email[0]
+    email_meta = get_one_email(db_connections["duckdb"], email_id).to_dict(orient="records")
+    if isinstance(email_meta, list) and email_meta:
+        email_meta = email_meta[0]
 
-    if email:
-        return HTMLResponse(content=create_detail_fragment(email))
+    if email_meta:
+        email = get_email_content(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
+
+        return HTMLResponse(content=create_detail_fragment(email_meta, email))
     else:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
