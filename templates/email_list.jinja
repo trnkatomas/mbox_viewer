@@ -11,4 +11,14 @@
         </div>
         <p class="text-sm {'font-medium text-gray-200' if is_unread else 'text-gray-400'} truncate mt-1">{{email_subject}}</p>
         <p class="text-xs text-gray-500 truncate mt-1">{{preview_text}}...</p>
+        {% if is_last %}
+                <div id="load-more-trigger"
+                    {# class="text-center p-4 text-gray-500 hover:text-blue-400 cursor-pointer border-t border-gray-700/50" #}
+                    hx-get="/api/email/list?page={{next_page}}"
+                    hx-trigger="intersect once"
+                    hx-target="#email-list-container"
+                    hx-swap="beforeend"
+                ><!--span class="animate-pulse">Loading more emails (Page {{next_page}})...</span-->
+                </div>
+        {% endif %}
     </div>
