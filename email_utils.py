@@ -1,6 +1,15 @@
 import email
 from email.policy import default
 from readabilipy import simple_json_from_html_string
+import email
+from email.policy import default
+from email.parser import BytesParser
+import textwrap
+import io
+import logging # New import for structured debugging and information
+
+# Set up a logger for the module
+logger = logging.getLogger(__name__)
 
 import chromadb
 import duckdb
@@ -22,8 +31,8 @@ EMAIL_DETAILS = [
     },
 ]
 
-mboxfilename = "/Users/tomastrnka/Downloads/email_sample.mbox"
-# mboxfilename = '/Users/tomastrnka/Downloads/bigger_example.mbox'
+# mboxfilename = "/Users/tomastrnka/Downloads/email_sample.mbox"
+mboxfilename = '/Users/tomastrnka/Downloads/bigger_example.mbox'
 
 
 class MboxReader:
@@ -92,11 +101,143 @@ def get_email_count(db):
         return 0
 
 
+def _extract_attachments(msg):
+    """
+    Internal function to iterate and extract all attachment parts.
+    Returns the full decoded binary content in the 'content' field.
+    """
+    attachments = []
+
+    # Iterate through all parts of the email
+    for i, part in enumerate(msg.walk()):
+        # Skip container parts
+        if part.is_multipart():
+            continue
+
+        content_type = part.get_content_type()
+        filename = part.get_filename()
+        content_disposition = part.get('Content-Disposition')
+
+        # An attachment is typically identified by a filename OR a Content-Disposition: attachment
+        is_attachment = filename or (content_disposition and content_disposition.startswith('attachment'))
+
+        if is_attachment:
+            logger.debug(f"[{i:02d}] Identified attachment: {filename} ({content_type})")
+
+            try:
+                # get_payload(decode=True) extracts the raw, decoded binary content
+                payload = part.get_payload(decode=True)
+            except Exception as e:
+                logger.error(f"Error decoding attachment content for {filename}: {e}")
+                payload = f"[Error decoding attachment content: {e}]".encode('utf-8')
+
+            # Truncate content for a clean preview (for logging/summary)
+            content_preview = payload[:50]
+
+            attachments.append({
+                'filename': filename or 'Untitled',
+                'content_type': content_type,
+                'size_bytes': len(payload),
+                'content': payload,  # Returns the full binary content
+                'content_preview': content_preview  # A small preview for easy viewing
+            })
+
+    return attachments
+
+
+def _extract_body_content(msg):
+    """
+    Internal function to extract and prioritize HTML or plain text body.
+    Priority: HTML > Plain Text.
+    Returns: A tuple (body_type, body_content_string)
+    """
+    email_body_html = None
+    email_body_text = None
+
+    for i, part in enumerate(msg.walk()):
+        # Skip container parts or parts clearly identified as attachments
+        if part.is_multipart() or part.get_filename() or (
+                part.get('Content-Disposition') and part.get('Content-Disposition').startswith('attachment')):
+            continue
+
+        content_type = part.get_content_type()
+        main_type = part.get_content_maintype()
+
+        is_body_part = main_type == 'text'
+
+        if is_body_part:
+            try:
+                # .get_content() automatically decodes the payload into a string
+                content = part.get_content()
+            except Exception as e:
+                logger.error(f"Error decoding body content (Part {i:02d}, Type {content_type}): {e}")
+                content = f"[Error decoding body content: {e}]"
+
+            if content_type == 'text/html':
+                email_body_html = content
+                logger.debug(f"[{i:02d}] Stored HTML Body.")
+            elif content_type == 'text/plain':
+                # Only store if not already set, in case of multiple plain parts
+                if email_body_text is None:
+                    email_body_text = content
+                logger.debug(f"[{i:02d}] Stored Plain Text Body.")
+
+    # 5. Determine which body to show (HTML first, then Plain Text)
+    if email_body_html:
+        logger.info("Prioritizing HTML body content.")
+        return ('HTML', email_body_html)
+    elif email_body_text:
+        logger.info("Falling back to Plain Text body content.")
+        return ('Plain Text', email_body_text)
+    else:
+        logger.info("No recognizable body content found.")
+        return ('None', None)
+
+
+# --- Main Library Function ---
+
+def parse_email(raw_email_string: str):
+    """
+    Parses a raw email string to extract prioritized body content and all attachments.
+
+    Args:
+        raw_email_string: The complete raw content of an email message.
+
+    Returns:
+        A dictionary containing:
+        - 'body': A tuple (body_type, body_content_string or None)
+        - 'attachments': A list of attachment dictionaries.
+    """
+
+    logger.info("Starting email parsing process...")
+
+    # 1. Convert string to bytes and parse the email message
+    try:
+        msg = BytesParser(policy=default).parsebytes(raw_email_string.encode('utf-8'))
+    except Exception as e:
+        logger.error(f"Failed to parse raw email string: {e}")
+        return {'body': ('Error', f"Parsing failed: {e}"), 'attachments': []}
+
+    # 2. Extract content using dedicated functions
+    body_info = _extract_body_content(msg)
+    attachments_list = _extract_attachments(msg)
+
+    logger.info(f"Finished parsing. Found {len(attachments_list)} attachments.")
+
+    return {
+        'body': body_info,
+        'attachments': attachments_list
+    }
+
+
 def get_email_content(email_start, email_end):
     with open(mboxfilename, 'rb') as infile:
         infile.seek(email_start)
         data = infile.read(email_end - email_start)
         parsed_email = email.message_from_bytes(data, policy=default)
+        email_content = _extract_body_content(parsed_email)
+        email_attachments = _extract_attachments(parsed_email)
+
         content = ''
         try:
             if len(list(parsed_email.iter_parts())) > 0:
@@ -184,7 +325,8 @@ def process(drop_previous_table=False):
         " content_type text,"
         " mbox_file_id text,"
         " email_line_start integer,"
-        " email_line_end integer)"
+        " email_line_end integer,"
+        " thread_id text)"
     )
     con.close()
 
@@ -223,7 +365,7 @@ def process(drop_previous_table=False):
                     mbox_file_hash,
                     boundaries[0],
                     boundaries[1],
-                    message.get("Authentication-Results"),
+                    message.get("X-GM-THRID", ""),
                 ]
                 con.execute(
                     f"""insert into emails 
@@ -238,9 +380,10 @@ def process(drop_previous_table=False):
                  content_type,
                  mbox_file_id,
                  email_line_start,
-                 email_line_end
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    data_to_insert[:12],
+                 email_line_end,
+                 thread_id
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    data_to_insert[:13],
                 )
 
         # check that the DB has been filled in

@@ -81,7 +81,23 @@ def create_detail_fragment(email_meta, email_content):
 async def index(request: Request):
     """Route to serve the base HTML template."""
     # Templates.TemplateResponse requires the request object
-    return templates.TemplateResponse("index.html", {"request": request})
+    #return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("new_take_on_that.html", {"request": request})
+
+
+@app.get("/api/stats/layout", response_class=HTMLResponse)
+async def stats_layout(request: Request):
+    """Route to serve the base HTML template."""
+    stats_template = templates.get_template("stats.jinja")
+    #return HTMLResponse(content=stats_template)
+    return templates.TemplateResponse("stats.jinja", {"request": request})
+
+
+@app.get("/api/inbox/layout", response_class=HTMLResponse)
+async def inbox_layout(request: Request):
+    mail_list_template = templates.get_template("mail_list.jinja")
+    #return HTMLResponse(content=mail_list_template)
+    return templates.TemplateResponse("mail_list.jinja", {"request": request})
 
 
 @app.get("/api/email/list", response_class=HTMLResponse)
