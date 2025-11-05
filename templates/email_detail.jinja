@@ -1,20 +1,89 @@
-        <div class="border-b border-gray-700 p-6 flex justify-between items-start">
-            <div>
-                <h2 class="text-2xl font-bold text-white">{{email_subject}}</h2>
-                <p class="text-sm text-gray-400 mt-1">From: <span class="text-white">{{email_sender}}</span></p>
-            </div>
-            <p class="text-sm text-gray-400 pt-1">{{email_date}}</p>
-        </div>
-        <div class="p-6 overflow-y-auto custom-scrollbar flex-grow bg-gray-800 text-lg">
-            {{email_body|safe}}
-        </div>
-        <div class="p-4 border-t border-gray-700 flex space-x-3 bg-gray-700/50 flex-shrink-0">
-            <button class="flex items-center space-x-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition duration-150 shadow-lg">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a2 2 0 012 2v6a2 2 0 01-2 2H3a2 2 0 01-2-2v-6a2 2 0 012-2zM7 10V5a2 2 0 012-2h6a2 2 0 012 2v5"></path></svg>
-                <span>Reply</span>
-            </button>
-            <button class="flex items-center space-x-1 px-4 py-2 bg-gray-600 hover:bg-gray-500 text-gray-200 text-sm font-medium rounded-lg transition duration-150 shadow-lg">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 4h4M4 7l4-4M15 10l4-4M15 10l-4 4M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                <span>Forward</span>
-            </button>
-        </div>
+
+        <div id="email-detail-pane"
+             class="flex-1 lg:flex-none p-6 bg-white border-l border-gray-200 overflow-y-auto custom-scroll shadow-xl">
+
+        <!--/div-->
+            <!-- THREAD CONTAINER: Messages are ordered oldest to newest (top to bottom) -->
+            <div id="thread-end" class="space-y-6">
+
+                <!-- MESSAGE 1 (Oldest - Now uniform) -->
+                <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
+                    <div class="flex justify-between items-start mb-2 border-b border-gray-100">
+                        <div><h2 class="text-2xl font-bold text-gray-900">{{email_subject}}</h2>
+                        <div class="text-sm font-semibold text-gray-600">From: {{email_sender}}</div>
+                        </div>
+                        <div class="text-xs text-gray-400">{{email_date}}</div>
+
+                    </div>
+                    <br>
+                    <p class="text-gray-700 leading-relaxed text-sm">
+                       {{email_body|safe}}
+                    </p>
+                    {% if has_attachment %}
+                        {% for att in attachments %}
+                            <div class="flex flex-wrap gap-2 mt-4">
+                                <a href="/api/attachment/{{email_id}}/{{att['filename']}}" target="_blank">
+                                <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
+                                    <!-- Paperclip Icon -->
+                                    <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                                    {{att['filename']}}
+                                    <span class="ml-2 text-xs text-indigo-400 font-normal">{{ '%.02f' % (att['size_bytes']/(1024*1024))}}MB</span>
+                                </span>
+                                </a>
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+
+                <!-- MESSAGE 2 (Middle - Now uniform) ->
+                <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
+                    <div class="flex justify-between items-start mb-2">
+                        <div class="text-sm font-semibold text-gray-900">Ben Smith</div>
+                        <div class="text-xs text-gray-400">Oct 28, 11:45 AM</div>
+                    </div>
+                    <p class="text-gray-800 leading-relaxed">
+                        I've made some mockups for the attachment badge and the thread visual. Let me know what you think.
+                    </p>
+
+                    <!-- *** ATTACHMENT BADGE: Clear Visual Indicator *** ->
+                    <div class="flex flex-wrap gap-2 mt-4">
+                        <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
+                            <!-- Paperclip Icon ->
+                            <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                            Design_Draft.pdf
+                            <span class="ml-2 text-xs text-indigo-400 font-normal">5.2MB</span>
+                        </span>
+                        <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
+                             <!-- Image Icon ->
+                            <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-10 4h.01M5 18h.01M16 18h.01"></path></svg>
+                            Logo_Final.jpg
+                        </span>
+                    </div>
+                </div>
+
+                <!-- MESSAGE 3 (Latest - Now uniform) ->
+                <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
+                    <div class="flex justify-between items-start mb-2">
+                        <!-- Highlighting the user's name is still useful for context ->
+                        <div class="text-sm font-extrabold text-indigo-600">Alice (Me)</div>
+                        <div class="text-xs text-gray-400">Oct 29, 10:30 AM</div>
+                    </div>
+
+                    <p class="text-gray-800 leading-relaxed">
+                        This looks great, especially the threading! I think the attachment badges are exactly what we need—clear and compact. Time to start the HTMX integration.
+                    </p>
+
+                    <!-- HTMX Reply Form Trigger ->
+                    <div class="mt-6 pt-4 border-t border-gray-100" id="reply-form-container">
+                        <!-- HTMX will replace this button with the full reply form HTML ->
+                        <button hx-get="/api/emails/125/reply-form" hx-target="#reply-form-container" hx-swap="outerHTML"
+                                class="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center transition duration-150">
+                            <svg class="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a2 2 0 012 2v8a2 2 0 01-2 2H3a2 2 0 01-2-2v-8a2 2 0 012-2zM9 10V2l-4 4-4-4v8"></path></svg>
+                            Reply to Thread
+                        </button>
+                    </div>
+                </div>-->
+
+         </div>
+         <!-- End of Thread Container -->
+</div>

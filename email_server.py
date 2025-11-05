@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Query, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -13,8 +13,12 @@ from email_utils import (
     get_email_content,
     get_email_list,
     get_one_email,
+    get_one_thread,
     load_email_content_search,
     load_email_db,
+    get_string_email_from_mboxfile,
+    parse_email,
+    get_attachment_file
 )
 
 db_connections = {}
@@ -64,14 +68,17 @@ def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0):
     return output
 
 
-def create_detail_fragment(email_meta, email_content):
+def create_detail_fragment(email_meta, email_content, attachments):
     """Generates the HTML for the email detail pane."""
     email_detail_template = templates.get_template("email_detail.jinja")
     output = email_detail_template.render(
+        email_id=email_meta["message_id"],
         email_subject=email_meta["subject"],
         email_sender=email_meta["from_email"],
         email_date=email_meta["date"],
         email_body=email_content,
+        has_attachment=email_meta['has_attachment'],
+        attachments=attachments
     )
     return output
 
@@ -81,8 +88,8 @@ def create_detail_fragment(email_meta, email_content):
 async def index(request: Request):
     """Route to serve the base HTML template."""
     # Templates.TemplateResponse requires the request object
-    #return templates.TemplateResponse("index.html", {"request": request})
-    return templates.TemplateResponse("new_take_on_that.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request})
+    #return templates.TemplateResponse("new_take_on_that.html", {"request": request})
 
 
 @app.get("/api/stats/layout", response_class=HTMLResponse)
@@ -141,12 +148,35 @@ async def email_detail(email_id: str):
 
     if email_meta:
         email = get_email_content(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
-
-        return HTMLResponse(content=create_detail_fragment(email_meta, email))
+        email_raw_string = get_string_email_from_mboxfile(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
+        attachments = parse_email(email_raw_string).get('attachments')
+        return HTMLResponse(content=create_detail_fragment(email_meta, email, attachments))
     else:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
             status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+
+@app.get("/api/email_thread/{thread_id}", response_class=HTMLResponse)
+async def email_detail(thread_id: str):
+    """HTMX route to load the detail pane content."""
+
+    email_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(orient="records")
+
+    return HTMLResponse(
+            content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+@app.get("/api/attachment/{email_id}/{attachment_id}", response_class=Response)
+async def get_attachment(email_id: str, attachment_id: str):
+    """HTMX route to load the detail pane content."""
+
+    attachment = get_attachment_file(db_connections["duckdb"], email_id, attachment_id)
+
+    return Response(
+            content=attachment['content'], media_type=attachment['content_type'],
         )
 
 

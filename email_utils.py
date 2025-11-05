@@ -92,6 +92,11 @@ def get_one_email(db, email_id):
     return rel.df()
 
 
+def get_one_thread(db, thread_id):
+    rel = db.execute("select * from emails where thread_id == ? limit 1", [thread_id])
+    return rel.df()
+
+
 def get_email_count(db):
     rel = db.execute("select count(distinct message_id) as email_count from emails")
     df = rel.df()
@@ -99,6 +104,18 @@ def get_email_count(db):
         return df.email_count.values[0]
     else:
         return 0
+
+
+def get_attachment_file(db, email_id, attachment_name):
+    email_data = get_one_email(db, email_id=email_id).to_dict(orient='records')
+    if isinstance(email_data, list) and email_data:
+        email_data = email_data[0]
+        email_raw_string = get_string_email_from_mboxfile(email_data.get('email_line_start'), email_data.get('email_line_end'))
+        attachments = parse_email(email_raw_string).get('attachments')
+        for a in attachments:
+            if attachment_name == a.get('filename'):
+                return a
+    return {}
 
 
 def _extract_attachments(msg):
@@ -196,7 +213,7 @@ def _extract_body_content(msg):
 
 # --- Main Library Function ---
 
-def parse_email(raw_email_string: str):
+def parse_email(raw_email: bytes):
     """
     Parses a raw email string to extract prioritized body content and all attachments.
 
@@ -213,7 +230,7 @@ def parse_email(raw_email_string: str):
 
     # 1. Convert string to bytes and parse the email message
     try:
-        msg = BytesParser(policy=default).parsebytes(raw_email_string.encode('utf-8'))
+        msg = BytesParser(policy=default).parsebytes(raw_email)
     except Exception as e:
         logger.error(f"Failed to parse raw email string: {e}")
         return {'body': ('Error', f"Parsing failed: {e}"), 'attachments': []}
@@ -228,6 +245,13 @@ def parse_email(raw_email_string: str):
         'body': body_info,
         'attachments': attachments_list
     }
+
+
+def get_string_email_from_mboxfile(email_start, email_end):
+    with open(mboxfilename, 'rb') as infile:
+        infile.seek(email_start)
+        data = infile.read(email_end - email_start)
+        return data
 
 
 def get_email_content(email_start, email_end):
