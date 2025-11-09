@@ -8,17 +8,29 @@
 
                 <!-- MESSAGE 1 (Oldest - Now uniform) -->
                 <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
-                    <div class="flex justify-between items-start mb-2 border-b border-gray-100">
+                    <div id="email-header" class="flex justify-between items-start mb-2 border-b border-gray-100">
                         <div><h2 class="text-2xl font-bold text-gray-900">{{email_subject}}</h2>
                         <div class="text-sm font-semibold text-gray-600">From: {{email_sender}}</div>
                         </div>
                         <div class="text-xs text-gray-400">{{email_date}}</div>
-
                     </div>
                     <br>
-                    <p class="text-gray-700 leading-relaxed text-sm">
-                       {{email_body|safe}}
-                    </p>
+                     <textarea
+                        id="htmlInput"
+                        style="display:none"
+                        class="form-control w-full h-48 font-mono text-sm p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 mb-4"
+                        placeholder="Enter HTML content here..."
+                    >{{email_body|safe}}</textarea>
+                    <div class="border-2 border-slate-200 rounded-lg overflow-hidden bg-slate-50">
+                        <span id="iframeHeight" class="text-sm text-slate-500"></span>
+                        <iframe
+                            id="contentFrame"
+                            sandbox="allow-same-origin allow-scripts"
+                            class="w-full border-0 bg-white"
+                            style="min-height: 200px;"
+                        ></iframe>
+                    </div>
+
                     {% if has_attachment %}
                         {% for att in attachments %}
                             <div class="flex flex-wrap gap-2 mt-4">
@@ -86,4 +98,141 @@
 
          </div>
          <!-- End of Thread Container -->
+         <!--script src="/static/iframe_wrapper.js"></script-->
+         <script>
+            console.log('calling the function to load the content');
+            var htmlInput = document.getElementById('htmlInput');
+            var iframe = document.getElementById('contentFrame');
+            var heightDisplay = document.getElementById('iframeHeight');
+            //var list_pane = document.getElementById('list-pane')
+
+        // Load content into iframe
+        function loadContent(html_content) {
+            const htmlContent = htmlInput.value || '<p style="padding: 20px;">Enter some HTML content and click "Load Content"</p>';
+
+            // Wrap content with resize script
+            const wrappedContent = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <style>
+                        body { margin: 0; padding: 16px; font-family: system-ui, -apple-system, sans-serif; }
+                    </style>
+                </head>
+                <body>
+                    ${htmlContent}
+                    <script>
+                        // Send height updates to parent
+                        function sendHeight() {
+                            try {
+                                const height = Math.max(
+                                    document.body.scrollHeight,
+                                    document.documentElement.scrollHeight,
+                                    document.body.offsetHeight,
+                                    document.documentElement.offsetHeight
+                                );
+                                console.log(document.body.scrollHeight);
+                                console.log(document.documentElement.scrollHeight);
+                                console.log(document.body.offsetHeight);
+                                console.log(document.documentElement.offsetHeight);
+                                console.log('just some print to enter the debugger');
+
+                                window.parent.postMessage({
+                                    type: 'resize',
+                                    height: height
+                                }, '*');
+
+                                console.log('Sent height:', height);
+                            } catch(e) {
+                                console.error('Failed to send height:', e);
+                            }
+                        }
+
+                        // Wait for DOM to be ready
+                        if (document.readyState === 'loading') {
+                            document.addEventListener('DOMContentLoaded', sendHeight);
+                        } else {
+                            sendHeight();
+                        }
+
+                        // Send after a short delay to ensure rendering
+                        setTimeout(sendHeight, 50);
+                        setTimeout(sendHeight, 200);
+                        setTimeout(sendHeight, 500);
+
+                        // Watch for changes
+                        const observer = new MutationObserver(function() {
+                            setTimeout(sendHeight, 10);
+                        });
+
+                        observer.observe(document.body, {
+                            attributes: true,
+                            childList: true,
+                            subtree: true
+                        });
+
+                        // Watch for resize
+                        window.addEventListener('resize', sendHeight);
+
+                        // Watch for images loading
+                        setTimeout(function() {
+                            document.querySelectorAll('img').forEach(img => {
+                                if (!img.complete) {
+                                    img.addEventListener('load', sendHeight);
+                                }
+                            });
+                        }, 0);
+                    <\/script>
+                </body>
+                </html>
+            `;
+
+            iframe.srcdoc = wrappedContent;
+        }
+
+         // Listen for resize messages from iframe
+        window.addEventListener('message', function(event) {
+            // Add safety check for event.data
+            if (event.data && event.data.type === 'resize') {
+                    var height = event.data.height;
+                     var list_pane = document.getElementById('list-pane');
+                     var email_header = document.getElementById('email-header');
+                     console.log(`observer resize list_pane: ${list_pane.offsetHeight}`);
+                     console.log(`observer resize email_header: ${email_header.offsetHeight}`);
+                     if (height > list_pane.offsetHeight) {
+                            height = list_pane.offsetHeight - email_header.offsetHeight - 100;
+                     }
+                    iframe.style.height = height + 'px';
+                    heightDisplay.textContent = `Height: ${height}px`;
+            }
+        }, false);
+
+        // Also handle iframe load event
+        iframe.addEventListener('load', function() {
+            // Give iframe time to calculate height
+            setTimeout(function() {
+                // Trigger a manual check if postMessage fails
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    if (iframeDoc) {
+                        var height = iframeDoc.documentElement.scrollHeight;
+                        console.log(`observer load height: ${height}`);
+                        var list_pane = document.getElementById('list-pane');
+                        var email_header = document.getElementById('email-header');
+                        console.log(`observer list_pane: ${list_pane.offsetHeight}`);
+                        console.log(`observer email_header: ${email_header.offsetHeight}`);
+                        if (height > list_pane.offsetHeight) {
+                            height = list_pane.offsetHeight - email_header.offsetHeight - 100;
+                        }
+                        iframe.style.height = height + 'px';
+                        heightDisplay.textContent = `Height: ${height}px (direct access)`;
+                    }
+                } catch(e) {
+                    console.log('Direct access blocked (cross-origin), relying on postMessage');
+                }
+            }, 100);
+        });
+            loadContent();
+         </script>
 </div>
