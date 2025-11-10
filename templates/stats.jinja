@@ -1,0 +1,48 @@
+<!-- Single Full-Width Pane that occupies the space of the list and detail panes -->
+      <section id="stats-full-pane" class="flex flex-col flex-grow bg-gray-50 shadow-inner h-full overflow-hidden w-full">
+
+            <div class="p-8 flex flex-col h-full overflow-y-auto custom-scrollbar bg-white">
+                    <h2 class="text-3xl font-bold text-gray-900 mb-8 border-b border-gray-200 pb-3">Email Usage Statistics</h2>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10">
+                        <div class="bg-blue-50 p-5 rounded-xl shadow-lg border border-blue-200">
+                            <p class="text-gray-600 text-sm">Total Emails</p>
+                            <p class="text-4xl font-extrabold text-blue-700">{{all_emails}}</p>
+                        </div>
+                        <div class="bg-green-50 p-5 rounded-xl shadow-lg border border-green-200">
+                            <p class="text-gray-600 text-sm">Timespan covering</p>
+                            <p class="text-4xl font-extrabold text-green-700">{{ '%.02f' % days_timespan}} years</p>
+                        </div>
+                        <div class="bg-yellow-50 p-5 rounded-xl shadow-lg border border-yellow-200">
+                            <p class="text-gray-600 text-sm">Avg. Email Size</p>
+                            <p class="text-4xl font-extrabold text-yellow-700">{{ '%.02f' %  (avg_size/(1024*1024))}} MB</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 xl:grid-cols-2 gap-8 flex-grow">
+                        <!-- Chart 1: Daily Email Volume (Line Chart) -->
+                        <div class="bg-gray-50 p-6 rounded-xl shadow-xl border border-gray-200 flex flex-col">
+                            <h3 class="text-xl font-semibold text-gray-900 mb-4">Daily Email Volume (Past Week)</h3>
+                            <div id="volume-chart" class="flex-grow min-h-[300px]"></div>
+                        </div>
+
+                        <!-- Chart 2: Emails per Sender (Pie/Donut Chart) -->
+                        <div class="bg-gray-50 p-6 rounded-xl shadow-xl border border-gray-200 flex flex-col items-center">
+                            <h3 class="text-xl font-semibold text-gray-900 mb-4 w-full">Emails by Sender Domain</h3>
+                            <div id="sender-chart" class="flex justify-center items-center"></div>
+                        </div>
+                    </div>
+
+                    <!-- Script to trigger D3 rendering after HTMX swap -->
+                    <script>
+                        setTimeout(() => {
+                            if (typeof loadStats === 'function') {
+                                loadStats();
+                            } else {
+                                console.error('loadStats function not found. Ensure D3 is loaded.');
+                            }
+                        }, 100);
+                    </script>
+                </div>
+      </section>
+                        <div class="bg-blue-50 p-5 rounded-xl shadow-lg border border-blue-200">

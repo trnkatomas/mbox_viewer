@@ -19,7 +19,8 @@ from email_utils import (
     get_string_email_from_mboxfile,
     parse_email,
     get_attachment_file,
-    get_thread_for_email
+    get_thread_for_email,
+    get_basic_stats,
 )
 
 db_connections = {}
@@ -69,7 +70,7 @@ def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0):
     return output
 
 
-def create_detail_fragment(email_meta, email_content, attachments):
+def create_detail_fragment(email_meta, email_content, attachments, is_in_thread):
     """Generates the HTML for the email detail pane."""
     email_detail_template = templates.get_template("email_detail.jinja")
     output = email_detail_template.render(
@@ -79,7 +80,26 @@ def create_detail_fragment(email_meta, email_content, attachments):
         email_date=email_meta["date"],
         email_body=email_content,
         has_attachment=email_meta['has_attachment'],
-        attachments=attachments
+        attachments=attachments,
+        thread=len(is_in_thread),
+        thread_id=is_in_thread[0].get('thread_id')
+    )
+    return output
+
+
+def create_thread_detail_fragment(email_meta, email_content, attachments, thread):
+    """Generates the HTML for the email detail pane."""
+    email_thread_detail_template = templates.get_template("email_detail_thread.jinja")
+    output = email_thread_detail_template.render(
+        email_id=thread[0]["message_id"],
+        email_subject=thread[0]["subject"],
+        email_sender=thread[0]["from_email"],
+        email_date=thread[0]["date"],
+        email_body=thread[0],
+        has_attachment=thread[0]['has_attachment'],
+        attachments=[],
+        thread=len(thread),
+        thread_id=thread[0].get('thread_id')
     )
     return output
 
@@ -90,15 +110,19 @@ async def index(request: Request):
     """Route to serve the base HTML template."""
     # Templates.TemplateResponse requires the request object
     return templates.TemplateResponse("index.html", {"request": request})
-    #return templates.TemplateResponse("new_take_on_that.html", {"request": request})
 
 
 @app.get("/api/stats/layout", response_class=HTMLResponse)
 async def stats_layout(request: Request):
     """Route to serve the base HTML template."""
     stats_template = templates.get_template("stats.jinja")
-    #return HTMLResponse(content=stats_template)
-    return templates.TemplateResponse("stats.jinja", {"request": request})
+
+    basic_stats = get_basic_stats(db_connections['duckdb'])
+    all_emails = basic_stats[0].to_dict(orient='records')[0].get('all_emails')
+    avg_size = basic_stats[1].to_dict(orient='records')[0].get('avg_size')
+    first_seen = basic_stats[2].to_dict(orient='records')[0].get('first_seen')
+    last_seen = basic_stats[2].to_dict(orient='records')[0].get('last_seen')
+    return HTMLResponse(content=stats_template.render(all_emails=all_emails, days_timespan=(last_seen-first_seen).days/365, avg_size=avg_size))
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
@@ -148,13 +172,12 @@ async def email_detail(email_id: str):
         email_meta = email_meta[0]
 
     if email_meta:
-        #email = get_email_content(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
         email_raw_string = get_string_email_from_mboxfile(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
         parsed_email = parse_email(email_raw_string)
         attachments = parsed_email.get('attachments')
         email_content = parsed_email.get('body')
         is_in_thread = get_thread_for_email(db_connections['duckdb'], email_id).to_dict(orient='records')
-        return HTMLResponse(content=create_detail_fragment(email_meta, email_content[1], attachments))
+        return HTMLResponse(content=create_detail_fragment(email_meta, email_content[1], attachments, is_in_thread))
     else:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
@@ -163,15 +186,25 @@ async def email_detail(email_id: str):
 
 
 @app.get("/api/email_thread/{thread_id}", response_class=HTMLResponse)
-async def email_detail(thread_id: str):
+async def email_thread_detail(thread_id: str):
     """HTMX route to load the detail pane content."""
 
-    email_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(orient="records")
+    thread_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(orient="records")
 
-    return HTMLResponse(
+    if thread_meta:
+        # for each email in thread
+        #email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_line_start'), thread_meta.get('email_line_end'))
+        #parsed_email = parse_email(email_raw_string)
+        #attachments = parsed_email.get('attachments')
+        #email_content = parsed_email.get('body')
+        #is_in_thread = get_thread_for_email(db_connections['duckdb'], the).to_dict(orient='records')
+        return HTMLResponse(content=create_thread_detail_fragment(None, None, None, thread_meta))
+    else:
+        return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
             status_code=status.HTTP_404_NOT_FOUND,
         )
+
 
 @app.get("/api/attachment/{email_id}/{attachment_id}", response_class=Response)
 async def get_attachment(email_id: str, attachment_id: str):

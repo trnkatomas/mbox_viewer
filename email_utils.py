@@ -93,6 +93,13 @@ def get_one_email(db, email_id):
     rel = db.execute("select * from emails where message_id == ? limit 1", [email_id])
     return rel.df()
 
+def get_basic_stats(db):
+    all_emails = db.execute("select count(distinct message_id) as all_emails from emails limit 1").df()
+    all_size = db.execute("select avg(email_line_end - email_line_start) as avg_size from emails limit 1").df()
+    all_timespan = db.execute("select min(date) as first_seen, max(date) as last_seen from emails limit 1").df()
+    return [all_emails, all_size, all_timespan]
+
+
 
 def get_thread_for_email(db, email_id):
     email_from_db = get_one_email(db, email_id)
@@ -360,8 +367,8 @@ def process(drop_previous_table=False):
         " labels text[],"
         " content_type text,"
         " mbox_file_id text,"
-        " email_line_start integer,"
-        " email_line_end integer,"
+        " email_start integer,"
+        " email_end integer,"
         " thread_id text)"
     )
     con.close()
@@ -415,8 +422,8 @@ def process(drop_previous_table=False):
                  labels,
                  content_type,
                  mbox_file_id,
-                 email_line_start,
-                 email_line_end,
+                 email_start,
+                 email_end,
                  thread_id
                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     data_to_insert[:13],

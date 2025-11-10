@@ -15,18 +15,12 @@
                         </div>
                         <div class="flex flex-col items-end space-y-2 pt-1">
                             <span class="text-xs text-gray-400">{{email_date}}</span>
-                            <div class="doesnt-exist"
-                                    hx-get="/api/email_thread/{{thread_id}}"
-                                    hx-target="#detail-pane"
-                                    hx-swap="innerHTML"
-                                    hx-indicator="#loading-indicator">
-                                <span class="flex items-center space-x-1 text-sm font-semibold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">
-                                    <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
-                                    </svg>
-                                    <span>{{thread}} messages</span>
-                                </span>
-                            </div>
+                            <span class="flex items-center space-x-1 text-sm font-semibold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">
+                                <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+                                </svg>
+                                <span>{{thread}} messages</span>
+                            </span>
                         </div>
                     </div>
                     {% if has_attachment %}
@@ -60,6 +54,26 @@
                     </div>
                 </div>
 
+                <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
+                    <div class="flex justify-between items-start mb-2">
+                        <div class="text-sm font-semibold text-gray-900">Ben Smith</div>
+                        <div class="text-xs text-gray-400">Oct 28, 11:45 AM</div>
+                    </div>
+                    <p class="text-gray-800 leading-relaxed">
+                        I've made some mockups for the attachment badge and the thread visual. Let me know what you think.
+                    </p>
+                    <div class="flex flex-wrap gap-2 mt-4">
+                        <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
+                            <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                            Design_Draft.pdf
+                            <span class="ml-2 text-xs text-indigo-400 font-normal">5.2MB</span>
+                        </span>
+                        <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
+                            <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-10 4h.01M5 18h.01M16 18h.01"></path></svg>
+                            Logo_Final.jpg
+                        </span>
+                    </div>
+                </div>
 
          </div>
          <!-- End of Thread Container -->
