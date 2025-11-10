@@ -201,7 +201,7 @@
                      console.log(`observer resize list_pane: ${list_pane.offsetHeight}`);
                      console.log(`observer resize email_header: ${email_header.offsetHeight}`);
                      if (height > list_pane.offsetHeight) {
-                            height = list_pane.offsetHeight - email_header.offsetHeight - 100;
+                            height = list_pane.offsetHeight - (email_header.offsetHeight*3);//- 100;
                      }
                     iframe.style.height = height + 'px';
                     heightDisplay.textContent = `Height: ${height}px`;
@@ -223,7 +223,7 @@
                         console.log(`observer list_pane: ${list_pane.offsetHeight}`);
                         console.log(`observer email_header: ${email_header.offsetHeight}`);
                         if (height > list_pane.offsetHeight) {
-                            height = list_pane.offsetHeight - email_header.offsetHeight - 100;
+                            height = list_pane.offsetHeight - (email_header.offsetHeight*3);//- 100;
                         }
                         iframe.style.height = height + 'px';
                         heightDisplay.textContent = `Height: ${height}px (direct access)`;

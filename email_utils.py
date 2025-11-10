@@ -1,5 +1,7 @@
 import email
 from email.policy import default
+
+import pandas as pd
 from readabilipy import simple_json_from_html_string
 import email
 from email.policy import default
@@ -92,8 +94,18 @@ def get_one_email(db, email_id):
     return rel.df()
 
 
+def get_thread_for_email(db, email_id):
+    email_from_db = get_one_email(db, email_id)
+    if not email_from_db.empty:
+        email_from_db = email_from_db.to_dict(orient="records")[0]
+        thread_id = email_from_db['thread_id']
+        return get_one_thread(db, thread_id)
+    else:
+        return pd.DataFrame()
+
+
 def get_one_thread(db, thread_id):
-    rel = db.execute("select * from emails where thread_id == ? limit 1", [thread_id])
+    rel = db.execute("select * from emails where thread_id == ?", [thread_id])
     return rel.df()
 
 

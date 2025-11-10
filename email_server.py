@@ -18,7 +18,8 @@ from email_utils import (
     load_email_db,
     get_string_email_from_mboxfile,
     parse_email,
-    get_attachment_file
+    get_attachment_file,
+    get_thread_for_email
 )
 
 db_connections = {}
@@ -147,10 +148,13 @@ async def email_detail(email_id: str):
         email_meta = email_meta[0]
 
     if email_meta:
-        email = get_email_content(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
+        #email = get_email_content(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
         email_raw_string = get_string_email_from_mboxfile(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
-        attachments = parse_email(email_raw_string).get('attachments')
-        return HTMLResponse(content=create_detail_fragment(email_meta, email, attachments))
+        parsed_email = parse_email(email_raw_string)
+        attachments = parsed_email.get('attachments')
+        email_content = parsed_email.get('body')
+        is_in_thread = get_thread_for_email(db_connections['duckdb'], email_id).to_dict(orient='records')
+        return HTMLResponse(content=create_detail_fragment(email_meta, email_content[1], attachments))
     else:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
@@ -183,4 +187,4 @@ async def get_attachment(email_id: str, attachment_id: str):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("email_server:app", host="0.0.0.0", port=8000, reload=True)
