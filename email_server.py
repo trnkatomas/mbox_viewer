@@ -1,9 +1,10 @@
+import datetime
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Annotated
 
-from fastapi import FastAPI, Query, Request, status
-from fastapi.responses import HTMLResponse, FileResponse, Response
+from fastapi import FastAPI, Query, Request, status, Form
+from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -21,6 +22,7 @@ from email_utils import (
     get_attachment_file,
     get_thread_for_email,
     get_basic_stats,
+    get_email_sizes_in_time
 )
 
 db_connections = {}
@@ -125,12 +127,60 @@ async def stats_layout(request: Request):
     return HTMLResponse(content=stats_template.render(all_emails=all_emails, days_timespan=(last_seen-first_seen).days/365, avg_size=avg_size))
 
 
+@app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
+async def stats_layout(query_name: str):
+    """Route to serve the base HTML template."""
+    if query_name == 'dates_size':
+        basic_stats = get_email_sizes_in_time(db_connections['duckdb'])
+        if not basic_stats.empty:
+            return basic_stats.to_dict(orient='records')
+    else:
+        return {}
+
+
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
 async def inbox_layout(request: Request):
     mail_list_template = templates.get_template("mail_list.jinja")
     #return HTMLResponse(content=mail_list_template)
     return templates.TemplateResponse("mail_list.jinja", {"request": request})
 
+
+@app.post("/api/search", response_class=HTMLResponse)
+async def handle_search(search_input: Annotated[str, Form()],): #
+
+    if "subject:" in search_input:
+        pass
+    elif "from:" in search_input:
+        pass
+    else:
+        pass
+
+    page = 2
+    start_index = (page - 1) * EMAILS_PER_PAGE
+    end_index = start_index + EMAILS_PER_PAGE
+
+    page_emails = get_email_list(
+        db_connections["duckdb"],
+        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
+    ).to_dict(orient="records")
+    all_emails = get_email_count(db_connections["duckdb"])
+    html_fragments = ""
+
+    has_more = end_index < all_emails
+
+    if has_more:
+        next_page = page + 1
+        for i, email in enumerate(page_emails):
+            is_last = i == len(page_emails)-1
+            html_fragments += create_list_item_fragment(email, is_last=is_last, next_page=next_page)
+    else:
+        for i, email in enumerate(page_emails):
+            html_fragments += create_list_item_fragment(email, is_last=False, next_page=-1)
+        html_fragments += """
+            <div class="text-center p-4 text-gray-600 border-t border-gray-700">End of Inbox.</div>
+        """
+
+    return HTMLResponse(content=html_fragments)
 
 @app.get("/api/email/list", response_class=HTMLResponse)
 async def email_list(page: int = Query(1, ge=1)):

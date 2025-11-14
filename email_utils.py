@@ -100,6 +100,19 @@ def get_basic_stats(db):
     return [all_emails, all_size, all_timespan]
 
 
+def get_email_sizes_in_time(db):
+    stats_query = """
+    with raw_data as (
+        select 1 as dummy, date_trunc('month', date) as mmonth, (email_line_end-email_line_start) as size from emails
+    ),
+    monthly_sizes as (
+        select mmonth, sum(size) as sizes from raw_data group by mmonth
+    )
+    select 1 as dummy, mmonth as date, sum(sizes) over (partition by dummy order by mmonth) as count from monthly_sizes
+    """
+    results = db.execute(stats_query).df()
+    return results
+
 
 def get_thread_for_email(db, email_id):
     email_from_db = get_one_email(db, email_id)
@@ -455,3 +468,42 @@ if __name__ == "__main__":
     parsed_args = arguments.parse_args()
 
     process(parsed_args.delete_table)
+
+    import requests
+
+    def ollama_embeddings(text, server_url, model):
+        response = requests.post(server_url, json={'model': model, 'input': text})
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {}
+
+    a = ollama_embeddings("what the heck is going on", "http://localhost:11434/api/embed", "embeddinggemma")
+
+    query = "Which planet is known as the Red Planet?"
+    documents = [
+      "Venus is often called Earth's twin because of its similar size and proximity.",
+      "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
+      "Jupiter, the largest planet in our solar system, has a prominent red spot.",
+      "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
+    ]
+
+    from sklearn.metrics.pairwise import cosine_similarity
+    import numpy as np
+
+    def get_distances(documents, queries):
+        query_prefix = "task: search result | query: "
+        document_prefix = "title: none | text: "
+
+        q_encoded = [ollama_embeddings(query_prefix + q, "http://localhost:11434/api/embed", "embeddinggemma") for q in queries]
+        d_encoded = [ollama_embeddings(document_prefix + d, "http://localhost:11434/api/embed", "embeddinggemma") for d in documents]
+
+        d_emb = np.vstack([np.array(d['embeddings']) for d in d_encoded])
+        q_emb = np.vstack([np.array(q['embeddings']) for q in q_encoded])
+
+        print(q_emb.shape, d_emb.shape)
+        return cosine_similarity(q_emb, d_emb)
+    # supposed output array([[0.30018332, 0.63578754, 0.49253921, 0.48859104]])
+
+
+

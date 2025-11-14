@@ -6,11 +6,16 @@
 
                         <div class="mt-3 relative">
                             <input
-                                type="text"
+                                type="search"
+                                name="search_input"
                                 id="search-input"
                                 placeholder="Search emails (e.g. subject: or from:)"
-                                class="w-full p-3 rounded-xl bg-gray-50 border border-gray-300 focus:ring-blue-500 focus:border-blue-500 text-sm placeholder-gray-500"
-                                oninput="handleSearchInput(this)"
+                                class="form-control w-full p-3 rounded-xl bg-gray-50 border border-gray-300 focus:ring-blue-500 focus:border-blue-500 text-sm placeholder-gray-500"
+                                hx-post="/api/search"
+                                hx-vals"js:this"
+                                hx-trigger="keyup[key=='Enter']"
+                                hx-target="#email-list-container"
+                                hx-indicator="#loading-indicator"
                             >
                             <div id="search-badges" class="absolute left-2 top-1/2 -translate-y-1/2 flex items-center hidden">
                             </div>
