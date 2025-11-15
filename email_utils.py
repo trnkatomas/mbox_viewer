@@ -312,17 +312,45 @@ def get_email_content(email_start, email_end):
         return content
 
 
-def get_email_list(db, criteria=None):
+def surround_with_wildcards(input):
+    return f'%{input}%'
+
+
+def get_email_list(db, criteria=None, additional_criteria=None, sent=False):
     if not criteria:
         rel = db.sql("select * from emails order by date desc limit 30")
         # return db.fetchall()
         return rel.df()
     else:
         if "limit" in criteria and "offset" in criteria:
-            db.execute(
-                "select * from emails order by date desc limit ? offset ?",
-                [criteria["limit"], criteria["offset"]],
-            )
+            additional_conditions = []
+            where_statements = []
+            if additional_criteria:
+                # todo check validity
+                if "from" in additional_criteria:
+                    where_statements.append("from_email like ?")
+                    additional_conditions.append(surround_with_wildcards(additional_criteria['from']))
+                if "subject" in additional_criteria:
+                    where_statements.append("subject like ?")
+                    additional_conditions.append(surround_with_wildcards(additional_criteria['subject']))
+                else:
+                    if excerpt := additional_criteria.get('excerpt'):
+                        where_statements.append("excerpt like ?")
+                        additional_conditions.append(surround_with_wildcards(excerpt))
+            if sent:
+                where_statements.append('? IN labels')
+                additional_conditions.append('Sent')
+            if where_statements:
+                where_statement = " AND ".join(where_statements)
+                db.execute(
+                    f"select * from emails where {where_statement} order by date desc limit ? offset ?",
+                    additional_conditions + [criteria["limit"], criteria["offset"]],
+                )
+            else:
+                db.execute(
+                    "select * from emails order by date desc limit ? offset ?",
+                    [criteria["limit"], criteria["offset"]],
+                )
         else:
             db.execute("select * from emails order by date desc limit 1")
         return db.df()

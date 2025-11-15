@@ -1,6 +1,7 @@
 import datetime
 import time
 from contextlib import asynccontextmanager
+import re
 from typing import Optional, Annotated
 
 from fastapi import FastAPI, Query, Request, status, Form
@@ -55,7 +56,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
-def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0):
+def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0, query:str = '', folder:str = ''):
     """Generates the HTML for a single email item."""
     preview_text = email["excerpt"]
 
@@ -67,7 +68,9 @@ def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0):
         email_subject=email["subject"],
         preview_text=preview_text,
         is_last=is_last,
-        next_page=next_page
+        next_page=next_page,
+        query=query,
+        folder=folder
     )
     return output
 
@@ -104,6 +107,21 @@ def create_thread_detail_fragment(email_meta, email_content, attachments, thread
         thread_id=thread[0].get('thread_id')
     )
     return output
+
+
+def parse_search_input(query: str):
+    regex = r"(from|subject|rag):(\"(.*)\"|([^ \n]+))"
+    matches = re.finditer(regex, query, re.MULTILINE)
+    matches_dict = {}
+    to_discard = []
+    for matchNum, match in enumerate(matches, start=1):
+        print("Match {matchNum} was found at {start}-{end}: {match}".format(matchNum=matchNum, start=match.start(),
+                                                                            end=match.end(), match=match.group()))
+        to_discard.extend(list(range(match.start(), match.end())))
+        matches_dict.update({match[1]: match[2]})
+    remainder = [c for i, c in enumerate(query) if i not in to_discard]
+    matches_dict['excerpt'] = "".join(remainder)
+    return matches_dict
 
 
 # --- FastAPI Routes ---
@@ -145,53 +163,37 @@ async def inbox_layout(request: Request):
     return templates.TemplateResponse("mail_list.jinja", {"request": request})
 
 
+@app.get("/api/sent/layout", response_class=HTMLResponse)
+async def inbox_layout(request: Request):
+    mail_list_template = templates.get_template("mail_list.jinja")
+    rendered_mail_list = mail_list_template.render(folder='Sent')
+    #return templates.TemplateResponse("mail_list.jinja", {"request": request})
+    return HTMLResponse(content=rendered_mail_list)
+
+
 @app.post("/api/search", response_class=HTMLResponse)
-async def handle_search(search_input: Annotated[str, Form()],): #
+async def handle_search(search_input: Annotated[str, Form()]):
+    parsed_search_query = parse_search_input(search_input)
+    return await email_list(page=1, query=search_input)
 
-    if "subject:" in search_input:
-        pass
-    elif "from:" in search_input:
-        pass
-    else:
-        pass
-
-    page = 2
-    start_index = (page - 1) * EMAILS_PER_PAGE
-    end_index = start_index + EMAILS_PER_PAGE
-
-    page_emails = get_email_list(
-        db_connections["duckdb"],
-        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
-    ).to_dict(orient="records")
-    all_emails = get_email_count(db_connections["duckdb"])
-    html_fragments = ""
-
-    has_more = end_index < all_emails
-
-    if has_more:
-        next_page = page + 1
-        for i, email in enumerate(page_emails):
-            is_last = i == len(page_emails)-1
-            html_fragments += create_list_item_fragment(email, is_last=is_last, next_page=next_page)
-    else:
-        for i, email in enumerate(page_emails):
-            html_fragments += create_list_item_fragment(email, is_last=False, next_page=-1)
-        html_fragments += """
-            <div class="text-center p-4 text-gray-600 border-t border-gray-700">End of Inbox.</div>
-        """
-
-    return HTMLResponse(content=html_fragments)
 
 @app.get("/api/email/list", response_class=HTMLResponse)
-async def email_list(page: int = Query(1, ge=1)):
+async def email_list(page: int = Query(1, ge=1), query: Optional[str] = None, folder: Optional[str] = None):
     """HTMX route to load the initial list and handle infinite scrolling."""
 
     start_index = (page - 1) * EMAILS_PER_PAGE
     end_index = start_index + EMAILS_PER_PAGE
 
+    if query:
+        additional_criteria = parse_search_input(query)
+    else:
+        additional_criteria = None
+
     page_emails = get_email_list(
         db_connections["duckdb"],
         criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
+        additional_criteria=additional_criteria,
+        sent=folder == 'Sent'
     ).to_dict(orient="records")
     all_emails = get_email_count(db_connections["duckdb"])
     html_fragments = ""
@@ -202,10 +204,10 @@ async def email_list(page: int = Query(1, ge=1)):
         next_page = page + 1
         for i, email in enumerate(page_emails):
             is_last = i == len(page_emails)-1
-            html_fragments += create_list_item_fragment(email, is_last=is_last, next_page=next_page)
+            html_fragments += create_list_item_fragment(email, is_last=is_last, next_page=next_page, query=query, folder=folder)
     else:
         for i, email in enumerate(page_emails):
-            html_fragments += create_list_item_fragment(email, is_last=False, next_page=-1)
+            html_fragments += create_list_item_fragment(email, is_last=False, next_page=-1, query=query, folder=folder)
         html_fragments += """
             <div class="text-center p-4 text-gray-600 border-t border-gray-700">End of Inbox.</div>
         """
