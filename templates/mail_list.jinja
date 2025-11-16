@@ -9,7 +9,7 @@
                                 type="search"
                                 name="search_input"
                                 id="search-input"
-                                placeholder="Search emails (e.g. subject: or from:)"
+                                placeholder="Search: from:user subject:topic rag:semantic from_date:2024-01-01 to_date:2024-12-31"
                                 class="form-control w-full p-3 rounded-xl bg-gray-50 border border-gray-300 focus:ring-blue-500 focus:border-blue-500 text-sm placeholder-gray-500"
                                 hx-post="/api/search"
                                 hx-vals"js:this"
@@ -20,6 +20,9 @@
                             <div id="search-badges" class="absolute left-2 top-1/2 -translate-y-1/2 flex items-center hidden">
                             </div>
                         </div>
+                        <p class="text-xs text-gray-500 mt-2">
+                            💡 <strong>Filters:</strong> from: subject: rag: (semantic) from_date: to_date:
+                        </p>
                     </header>
 
                     <!-- HTMX load the initial list content -->

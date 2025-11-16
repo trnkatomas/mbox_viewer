@@ -33,9 +33,9 @@ EMAILS_PER_PAGE = 5
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load the ML model
+    # Load the database and initialize VSS extension
     db_connections["duckdb"] = load_email_db()
-    db_connections["chromadb"] = load_email_content_search()
+    db_connections["duckdb"] = load_email_content_search(db_connections["duckdb"])
     yield
     # Clean up the DB connections
     if duckdb_con := db_connections.get("duckdb"):
@@ -110,7 +110,17 @@ def create_thread_detail_fragment(email_meta, email_content, attachments, thread
 
 
 def parse_search_input(query: str):
-    regex = r"(from|subject|rag):(\"(.*)\"|([^ \n]+))"
+    """
+    Parse search query for special filters.
+
+    Supported filters:
+    - from:email - Filter by sender
+    - subject:text - Filter by subject
+    - rag:text - Semantic search
+    - from_date:YYYY-MM-DD - Filter from date
+    - to_date:YYYY-MM-DD - Filter to date
+    """
+    regex = r"(from|subject|rag|from_date|to_date):(\"(.*)\"|([^ \n]+))"
     matches = re.finditer(regex, query, re.MULTILINE)
     matches_dict = {}
     to_discard = []
@@ -118,9 +128,11 @@ def parse_search_input(query: str):
         print("Match {matchNum} was found at {start}-{end}: {match}".format(matchNum=matchNum, start=match.start(),
                                                                             end=match.end(), match=match.group()))
         to_discard.extend(list(range(match.start(), match.end())))
-        matches_dict.update({match[1]: match[2]})
+        # Extract the value (either quoted or unquoted)
+        value = match[3] if match[3] else match[4]
+        matches_dict.update({match[1]: value})
     remainder = [c for i, c in enumerate(query) if i not in to_discard]
-    matches_dict['excerpt'] = "".join(remainder)
+    matches_dict['excerpt'] = "".join(remainder).strip()
     return matches_dict
 
 
@@ -184,16 +196,29 @@ async def email_list(page: int = Query(1, ge=1), query: Optional[str] = None, fo
     start_index = (page - 1) * EMAILS_PER_PAGE
     end_index = start_index + EMAILS_PER_PAGE
 
+    # Parse search query if provided
     if query:
         additional_criteria = parse_search_input(query)
     else:
         additional_criteria = None
 
+    # Handle RAG semantic search if rag: query provided
+    rag_message_ids = None
+    if additional_criteria and 'rag' in additional_criteria:
+        from email_utils import rag_search_duckdb
+        rag_query = additional_criteria.pop('rag')  # Remove from criteria, handle separately
+        rag_message_ids = rag_search_duckdb(
+            db_connections["duckdb"],
+            rag_query,
+            n_results=100  # Get more RAG results, then filter/paginate
+        )
+
     page_emails = get_email_list(
         db_connections["duckdb"],
         criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
         additional_criteria=additional_criteria,
-        sent=folder == 'Sent'
+        sent=folder == 'Sent',
+        rag_message_ids=rag_message_ids
     ).to_dict(orient="records")
     all_emails = get_email_count(db_connections["duckdb"])
     html_fragments = ""

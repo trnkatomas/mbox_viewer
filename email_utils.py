@@ -316,30 +316,62 @@ def surround_with_wildcards(input):
     return f'%{input}%'
 
 
-def get_email_list(db, criteria=None, additional_criteria=None, sent=False):
+def get_email_list(db, criteria=None, additional_criteria=None, sent=False, rag_message_ids=None):
+    """
+    Get email list with optional filtering.
+
+    Args:
+        db: DuckDB connection
+        criteria: Dict with 'limit' and 'offset' for pagination
+        additional_criteria: Dict with search filters (from, subject, excerpt, from_date, to_date)
+        sent: Boolean to filter for sent emails
+        rag_message_ids: List of message IDs from RAG search to filter by
+    """
     if not criteria:
         rel = db.sql("select * from emails order by date desc limit 30")
-        # return db.fetchall()
         return rel.df()
     else:
         if "limit" in criteria and "offset" in criteria:
             additional_conditions = []
             where_statements = []
             if additional_criteria:
-                # todo check validity
+                # Email address filter
                 if "from" in additional_criteria:
                     where_statements.append("from_email like ?")
                     additional_conditions.append(surround_with_wildcards(additional_criteria['from']))
+
+                # Subject filter
                 if "subject" in additional_criteria:
                     where_statements.append("subject like ?")
                     additional_conditions.append(surround_with_wildcards(additional_criteria['subject']))
                 else:
+                    # Excerpt filter (only if subject not specified)
                     if excerpt := additional_criteria.get('excerpt'):
                         where_statements.append("excerpt like ?")
                         additional_conditions.append(surround_with_wildcards(excerpt))
+
+                # Date range filters
+                if "from_date" in additional_criteria and additional_criteria['from_date']:
+                    where_statements.append("date >= ?")
+                    additional_conditions.append(additional_criteria['from_date'])
+
+                if "to_date" in additional_criteria and additional_criteria['to_date']:
+                    where_statements.append("date <= ?")
+                    additional_conditions.append(additional_criteria['to_date'])
+
+            # Sent folder filter
             if sent:
                 where_statements.append('? IN labels')
                 additional_conditions.append('Sent')
+
+            # RAG search results filter
+            if rag_message_ids:
+                # Create placeholders for the IN clause
+                placeholders = ','.join(['?' for _ in rag_message_ids])
+                where_statements.append(f"message_id IN ({placeholders})")
+                additional_conditions.extend(rag_message_ids)
+
+            # Execute query
             if where_statements:
                 where_statement = " AND ".join(where_statements)
                 db.execute(
@@ -356,10 +388,112 @@ def get_email_list(db, criteria=None, additional_criteria=None, sent=False):
         return db.df()
 
 
-def load_email_content_search(email_embeddings_name="emails.chromadb"):
-    chroma_client = chromadb.PersistentClient(path="emails.chromadb")
-    emails_collection = chroma_client.get_or_create_collection(name="emails")
-    return emails_collection
+def load_email_content_search(db):
+    """
+    Initialize DuckDB for vector search by installing and loading VSS extension.
+
+    Args:
+        db: DuckDB connection
+
+    Returns:
+        The same db connection with VSS loaded
+    """
+    try:
+        # Install and load the VSS extension for vector similarity search
+        db.execute("INSTALL vss;")
+        db.execute("LOAD vss;")
+        logger.info("DuckDB VSS extension loaded successfully")
+    except Exception as e:
+        logger.warning(f"VSS extension may already be installed: {e}")
+
+    return db
+
+
+def get_ollama_embedding(text, server_url=None, model=None):
+    """
+    Get embedding vector from Ollama server.
+
+    Args:
+        text: Text to embed
+        server_url: Ollama API endpoint (defaults to OLLAMA_URL env var or http://localhost:11434/api/embed)
+        model: Embedding model to use (defaults to OLLAMA_MODEL env var or nomic-embed-text)
+
+    Returns:
+        List of floats representing the embedding vector, or None on failure
+    """
+    import requests
+
+    # Get configuration from environment variables if not provided
+    if server_url is None:
+        server_url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/embed")
+    if model is None:
+        model = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
+
+    try:
+        response = requests.post(
+            server_url,
+            json={'model': model, 'input': text},
+            timeout=30
+        )
+        if response.status_code == 200:
+            result = response.json()
+            # Ollama returns embeddings in different formats depending on version
+            if 'embeddings' in result:
+                return result['embeddings'][0] if isinstance(result['embeddings'], list) else result['embeddings']
+            elif 'embedding' in result:
+                return result['embedding']
+            else:
+                logger.error(f"Unexpected Ollama response format: {result.keys()}")
+                return None
+        else:
+            logger.error(f"Ollama embedding failed with status {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to get embedding from Ollama: {e}")
+        return None
+
+
+def rag_search_duckdb(db, query_text, n_results=50):
+    """
+    Perform semantic search using DuckDB's VSS extension with cosine distance.
+
+    Args:
+        db: DuckDB connection with VSS loaded
+        query_text: The search query text
+        n_results: Number of results to return (default 50)
+
+    Returns:
+        List of message IDs from semantically similar emails
+    """
+    try:
+        if not query_text:
+            return []
+
+        # Get embedding for the query (uses OLLAMA_URL env var)
+        query_vec = get_ollama_embedding(query_text)
+
+        if not query_vec:
+            logger.warning("Failed to generate embedding for RAG search")
+            return []
+
+        # Perform vector similarity search using array_cosine_distance
+        # Lower distance = more similar (0 = identical, 2 = opposite)
+        rel = db.execute("""
+            SELECT message_id, array_cosine_distance(vec, ?::FLOAT[768]) as dist
+            FROM embeddings
+            ORDER BY dist ASC
+            LIMIT ?
+        """, [query_vec, n_results])
+
+        results = rel.fetchall()
+        message_ids = [row[0] for row in results]
+        logger.info(f"RAG search for '{query_text}' returned {len(message_ids)} results")
+
+        return message_ids
+
+    except Exception as e:
+        logger.error(f"RAG search failed: {e}")
+        return []
 
 
 def process(drop_previous_table=False):
