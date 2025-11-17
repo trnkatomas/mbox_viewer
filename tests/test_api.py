@@ -9,14 +9,13 @@ import pandas as pd
 def mock_db_connections():
     """Mock database connections for testing."""
     mock_duckdb = Mock()
-    mock_chromadb = Mock()
 
     # Setup mock responses
     mock_duckdb.execute = Mock()
     mock_duckdb.close = Mock()
 
-    with patch('email_server.db_connections', {'duckdb': mock_duckdb, 'chromadb': mock_chromadb}):
-        yield {'duckdb': mock_duckdb, 'chromadb': mock_chromadb}
+    with patch('email_server.db_connections', {'duckdb': mock_duckdb}):
+        yield {'duckdb': mock_duckdb}
 
 
 @pytest.fixture
@@ -24,10 +23,9 @@ def client(mock_db_connections):
     """Create a test client with mocked dependencies."""
     # Mock the lifespan to avoid actual DB connections
     with patch('email_server.load_email_db', return_value=mock_db_connections['duckdb']):
-        with patch('email_server.load_email_content_search', return_value=mock_db_connections['chromadb']):
-            from email_server import app
-            with TestClient(app) as test_client:
-                yield test_client
+        from email_server import app
+        with TestClient(app) as test_client:
+            yield test_client
 
 
 class TestMainEndpoints:
