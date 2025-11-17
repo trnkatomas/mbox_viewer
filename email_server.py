@@ -78,6 +78,7 @@ def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0, 
 def create_detail_fragment(email_meta, email_content, attachments, is_in_thread):
     """Generates the HTML for the email detail pane."""
     email_detail_template = templates.get_template("email_detail.jinja")
+    thread_id = is_in_thread[0].get('thread_id') if is_in_thread else None
     output = email_detail_template.render(
         email_id=email_meta["message_id"],
         email_subject=email_meta["subject"],
@@ -87,7 +88,7 @@ def create_detail_fragment(email_meta, email_content, attachments, is_in_thread)
         has_attachment=email_meta['has_attachment'],
         attachments=attachments,
         thread=len(is_in_thread),
-        thread_id=is_in_thread[0].get('thread_id')
+        thread_id=thread_id
     )
     return output
 
@@ -264,8 +265,16 @@ async def get_attachment(email_id: str, attachment_id: str):
 
     attachment = get_attachment_file(db_connections["duckdb"], email_id, attachment_id)
 
+    if not attachment or 'content' not in attachment:
+        return Response(
+            content="Attachment not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
     return Response(
-            content=attachment['content'], media_type=attachment['content_type'],
+            content=attachment['content'],
+            media_type=attachment['content_type'],
+            headers={'content-disposition': f'attachment; filename="{attachment_id}"'}
         )
 
 
