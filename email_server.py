@@ -272,7 +272,7 @@ async def email_detail(email_id: str):
 
     if email_meta:
         email_raw_string = get_string_email_from_mboxfile(
-            email_meta.get("email_line_start"), email_meta.get("email_line_end")
+            email_meta.get("email_start"), email_meta.get("email_end")
         )
         parsed_email = parse_email(email_raw_string)
         attachments = parsed_email.get("attachments")
@@ -302,7 +302,7 @@ async def email_thread_detail(thread_id: str):
 
     if thread_meta:
         # for each email in thread
-        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_line_start'), thread_meta.get('email_line_end'))
+        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_start'), thread_meta.get('email_end'))
         # parsed_email = parse_email(email_raw_string)
         # attachments = parsed_email.get('attachments')
         # email_content = parsed_email.get('body')

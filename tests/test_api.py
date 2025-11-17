@@ -109,8 +109,8 @@ class TestEmailEndpoints:
             'from_email': ['sender@example.com'],
             'date': ['2024-01-01 12:00:00'],
             'has_attachment': [False],
-            'email_line_start': [0],
-            'email_line_end': [100]
+            'email_start': [0],
+            'email_end': [100]
         })
 
         mock_raw_email = b'From: sender@example.com\nSubject: Test\n\nBody'
@@ -142,8 +142,8 @@ class TestEmailEndpoints:
             'date': ['2024-01-01 12:00:00', '2024-01-01 13:00:00'],
             'thread_id': ['thread1', 'thread1'],
             'has_attachment': [False, False],
-            'email_line_start': [0, 100],
-            'email_line_end': [100, 200]
+            'email_start': [0, 100],
+            'email_end': [100, 200]
         })
 
         with patch('email_server.get_one_thread', return_value=mock_thread):

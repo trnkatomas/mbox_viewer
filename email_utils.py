@@ -103,7 +103,7 @@ def get_basic_stats(db):
         "select count(distinct message_id) as all_emails from emails limit 1"
     ).df()
     all_size = db.execute(
-        "select avg(email_line_end - email_line_start) as avg_size from emails limit 1"
+        "select avg(email_end - email_start) as avg_size from emails limit 1"
     ).df()
     all_timespan = db.execute(
         "select min(date) as first_seen, max(date) as last_seen from emails limit 1"
@@ -114,7 +114,7 @@ def get_basic_stats(db):
 def get_email_sizes_in_time(db):
     stats_query = """
     with raw_data as (
-        select 1 as dummy, date_trunc('month', date) as mmonth, (email_line_end-email_line_start) as size from emails
+        select 1 as dummy, date_trunc('month', date) as mmonth, (email_end-email_start) as size from emails
     ),
     monthly_sizes as (
         select mmonth, sum(size) as sizes from raw_data group by mmonth
@@ -154,7 +154,7 @@ def get_attachment_file(db, email_id, attachment_name):
     if isinstance(email_data, list) and email_data:
         email_data = email_data[0]
         email_raw_string = get_string_email_from_mboxfile(
-            email_data.get("email_line_start"), email_data.get("email_line_end")
+            email_data.get("email_start"), email_data.get("email_end")
         )
         attachments = parse_email(email_raw_string).get("attachments")
         for a in attachments:
@@ -411,7 +411,7 @@ def get_email_list(db, criteria=None, additional_criteria=None, sent=False, rag_
                 additional_conditions.append("Sent")
 
             # RAG search results filter
-            if rag_message_ids:
+            if not rag_message_ids.empty:
                 # Create placeholders for the IN clause
                 placeholders = ",".join(["?" for _ in rag_message_ids])
                 where_statements.append(f"message_id IN ({placeholders})")
@@ -473,7 +473,7 @@ def get_ollama_embedding(text, server_url=None, model=None):
     if server_url is None:
         server_url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/embed")
     if model is None:
-        model = os.getenv("OLLAMA_MODEL", "nomic-embed-text")
+        model = os.getenv("OLLAMA_MODEL", "embeddinggemma")
 
     try:
         response = requests.post(
@@ -516,7 +516,7 @@ def rag_search_duckdb(db, query_text, n_results=50):
             return []
 
         # Get embedding for the query (uses OLLAMA_URL env var)
-        query_vec = get_ollama_embedding(query_text)
+        query_vec = get_ollama_embedding(query_prefix + query_text)
 
         if not query_vec:
             logger.warning("Failed to generate embedding for RAG search")
@@ -525,17 +525,23 @@ def rag_search_duckdb(db, query_text, n_results=50):
         # Perform vector similarity search using array_cosine_distance
         # Lower distance = more similar (0 = identical, 2 = opposite)
         rel = db.execute("""
-            SELECT message_id, array_cosine_distance(vec, ?::FLOAT[768]) as dist
-            FROM embeddings
-            ORDER BY dist ASC
-            LIMIT ?
+            with dists as (
+                SELECT message_id, array_cosine_distance(vec, ?::FLOAT[768]) as dist
+                FROM embeddings
+                ORDER BY dist ASC
+                LIMIT ?
+            )
+            select emails.message_id, subject, dists.dist
+            from emails join
+            dists on dists.message_id == emails.message_id 
+            where dist < 0.5
+            order by dist asc
         """, [query_vec, n_results])
 
-        results = rel.fetchall()
-        message_ids = [row[0] for row in results]
-        logger.info(f"RAG search for '{query_text}' returned {len(message_ids)} results")
+        results = rel.df()
+        logger.info(f"RAG search for '{query_text}' returned {results.shape[0]} results")
 
-        return message_ids
+        return results['message_id']
 
     except Exception as e:
         logger.error(f"RAG search failed: {e}")

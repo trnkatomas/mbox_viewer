@@ -112,8 +112,8 @@ def test_db():
             date TIMESTAMP,
             excerpt VARCHAR,
             has_attachment BOOLEAN,
-            email_line_start INTEGER,
-            email_line_end INTEGER,
+            email_start INTEGER,
+            email_end INTEGER,
             thread_id VARCHAR,
             labels VARCHAR
         )
