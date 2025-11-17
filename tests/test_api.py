@@ -113,13 +113,18 @@ class TestEmailEndpoints:
             'email_line_end': [100]
         })
 
-        mock_body = ('Plain Text', 'This is the email body')
+        mock_raw_email = b'From: sender@example.com\nSubject: Test\n\nBody'
+        mock_parsed_email = {
+            'body': ('Plain Text', 'This is the email body'),
+            'attachments': []
+        }
 
         with patch('email_server.get_one_email', return_value=mock_email):
-            with patch('email_server.get_email_content', return_value=mock_body):
-                with patch('email_server.get_thread_for_email', return_value=pd.DataFrame()):
-                    response = client.get("/api/email/<test1@example.com>")
-                    assert response.status_code == 200
+            with patch('email_server.get_string_email_from_mboxfile', return_value=mock_raw_email):
+                with patch('email_server.parse_email', return_value=mock_parsed_email):
+                    with patch('email_server.get_thread_for_email', return_value=pd.DataFrame()):
+                        response = client.get("/api/email/<test1@example.com>")
+                        assert response.status_code == 200
 
     def test_email_detail_not_found(self, client):
         """Test email detail with non-existent email."""
