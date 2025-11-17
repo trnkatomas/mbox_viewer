@@ -23,7 +23,7 @@ from email_utils import (
     get_attachment_file,
     get_thread_for_email,
     get_basic_stats,
-    get_email_sizes_in_time
+    get_email_sizes_in_time,
 )
 
 db_connections = {}
@@ -56,7 +56,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
-def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0, query:str = '', folder:str = ''):
+def create_list_item_fragment(
+    email, is_last: bool = False, next_page: int = 0, query: str = "", folder: str = ""
+):
     """Generates the HTML for a single email item."""
     preview_text = email["excerpt"]
 
@@ -70,7 +72,7 @@ def create_list_item_fragment(email, is_last: bool = False, next_page: int = 0, 
         is_last=is_last,
         next_page=next_page,
         query=query,
-        folder=folder
+        folder=folder,
     )
     return output
 
@@ -85,7 +87,7 @@ def create_detail_fragment(email_meta, email_content, attachments, is_in_thread)
         email_sender=email_meta["from_email"],
         email_date=email_meta["date"],
         email_body=email_content,
-        has_attachment=email_meta['has_attachment'],
+        has_attachment=email_meta["has_attachment"],
         attachments=attachments,
         thread=len(is_in_thread),
         thread_id=thread_id
@@ -102,26 +104,32 @@ def create_thread_detail_fragment(email_meta, email_content, attachments, thread
         email_sender=thread[0]["from_email"],
         email_date=thread[0]["date"],
         email_body=thread[0],
-        has_attachment=thread[0]['has_attachment'],
+        has_attachment=thread[0]["has_attachment"],
         attachments=[],
         thread=len(thread),
-        thread_id=thread[0].get('thread_id')
+        thread_id=thread[0].get("thread_id"),
     )
     return output
 
 
 def parse_search_input(query: str):
-    regex = r"(from|subject|rag):(\"(.*)\"|([^ \n]+))"
+    regex = r"(from|subject|rag|label):(\"(.*)\"|([^ \n]+))"
     matches = re.finditer(regex, query, re.MULTILINE)
     matches_dict = {}
     to_discard = []
     for matchNum, match in enumerate(matches, start=1):
-        print("Match {matchNum} was found at {start}-{end}: {match}".format(matchNum=matchNum, start=match.start(),
-                                                                            end=match.end(), match=match.group()))
+        print(
+            "Match {matchNum} was found at {start}-{end}: {match}".format(
+                matchNum=matchNum,
+                start=match.start(),
+                end=match.end(),
+                match=match.group(),
+            )
+        )
         to_discard.extend(list(range(match.start(), match.end())))
         matches_dict.update({match[1]: match[2]})
     remainder = [c for i, c in enumerate(query) if i not in to_discard]
-    matches_dict['excerpt'] = "".join(remainder)
+    matches_dict["excerpt"] = "".join(remainder)
     return matches_dict
 
 
@@ -138,37 +146,40 @@ async def stats_layout(request: Request):
     """Route to serve the base HTML template."""
     stats_template = templates.get_template("stats.jinja")
 
-    basic_stats = get_basic_stats(db_connections['duckdb'])
-    all_emails = basic_stats[0].to_dict(orient='records')[0].get('all_emails')
-    avg_size = basic_stats[1].to_dict(orient='records')[0].get('avg_size')
-    first_seen = basic_stats[2].to_dict(orient='records')[0].get('first_seen')
-    last_seen = basic_stats[2].to_dict(orient='records')[0].get('last_seen')
-    return HTMLResponse(content=stats_template.render(all_emails=all_emails, days_timespan=(last_seen-first_seen).days/365, avg_size=avg_size))
+    basic_stats = get_basic_stats(db_connections["duckdb"])
+    all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails")
+    avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size")
+    first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
+    last_seen = basic_stats[2].to_dict(orient="records")[0].get("last_seen")
+    return HTMLResponse(
+        content=stats_template.render(
+            all_emails=all_emails,
+            days_timespan=(last_seen - first_seen).days / 365,
+            avg_size=avg_size,
+        )
+    )
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
 async def stats_layout(query_name: str):
     """Route to serve the base HTML template."""
-    if query_name == 'dates_size':
-        basic_stats = get_email_sizes_in_time(db_connections['duckdb'])
+    if query_name == "dates_size":
+        basic_stats = get_email_sizes_in_time(db_connections["duckdb"])
         if not basic_stats.empty:
-            return basic_stats.to_dict(orient='records')
+            return basic_stats.to_dict(orient="records")
     else:
         return {}
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
 async def inbox_layout(request: Request):
-    mail_list_template = templates.get_template("mail_list.jinja")
-    #return HTMLResponse(content=mail_list_template)
     return templates.TemplateResponse("mail_list.jinja", {"request": request})
 
 
 @app.get("/api/sent/layout", response_class=HTMLResponse)
 async def inbox_layout(request: Request):
     mail_list_template = templates.get_template("mail_list.jinja")
-    rendered_mail_list = mail_list_template.render(folder='Sent')
-    #return templates.TemplateResponse("mail_list.jinja", {"request": request})
+    rendered_mail_list = mail_list_template.render(folder="Sent")
     return HTMLResponse(content=rendered_mail_list)
 
 
@@ -179,7 +190,11 @@ async def handle_search(search_input: Annotated[str, Form()]):
 
 
 @app.get("/api/email/list", response_class=HTMLResponse)
-async def email_list(page: int = Query(1, ge=1), query: Optional[str] = None, folder: Optional[str] = None):
+async def email_list(
+    page: int = Query(1, ge=1),
+    query: Optional[str] = None,
+    folder: Optional[str] = None,
+):
     """HTMX route to load the initial list and handle infinite scrolling."""
 
     start_index = (page - 1) * EMAILS_PER_PAGE
@@ -194,7 +209,7 @@ async def email_list(page: int = Query(1, ge=1), query: Optional[str] = None, fo
         db_connections["duckdb"],
         criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
         additional_criteria=additional_criteria,
-        sent=folder == 'Sent'
+        sent=folder == "Sent",
     ).to_dict(orient="records")
     all_emails = get_email_count(db_connections["duckdb"])
     html_fragments = ""
@@ -204,11 +219,15 @@ async def email_list(page: int = Query(1, ge=1), query: Optional[str] = None, fo
     if has_more:
         next_page = page + 1
         for i, email in enumerate(page_emails):
-            is_last = i == len(page_emails)-1
-            html_fragments += create_list_item_fragment(email, is_last=is_last, next_page=next_page, query=query, folder=folder)
+            is_last = i == len(page_emails) - 1
+            html_fragments += create_list_item_fragment(
+                email, is_last=is_last, next_page=next_page, query=query, folder=folder
+            )
     else:
         for i, email in enumerate(page_emails):
-            html_fragments += create_list_item_fragment(email, is_last=False, next_page=-1, query=query, folder=folder)
+            html_fragments += create_list_item_fragment(
+                email, is_last=False, next_page=-1, query=query, folder=folder
+            )
         html_fragments += """
             <div class="text-center p-4 text-gray-600 border-t border-gray-700">End of Inbox.</div>
         """
@@ -220,17 +239,27 @@ async def email_list(page: int = Query(1, ge=1), query: Optional[str] = None, fo
 async def email_detail(email_id: str):
     """HTMX route to load the detail pane content."""
 
-    email_meta = get_one_email(db_connections["duckdb"], email_id).to_dict(orient="records")
+    email_meta = get_one_email(db_connections["duckdb"], email_id).to_dict(
+        orient="records"
+    )
     if isinstance(email_meta, list) and email_meta:
         email_meta = email_meta[0]
 
     if email_meta:
-        email_raw_string = get_string_email_from_mboxfile(email_meta.get('email_line_start'), email_meta.get('email_line_end'))
+        email_raw_string = get_string_email_from_mboxfile(
+            email_meta.get("email_line_start"), email_meta.get("email_line_end")
+        )
         parsed_email = parse_email(email_raw_string)
-        attachments = parsed_email.get('attachments')
-        email_content = parsed_email.get('body')
-        is_in_thread = get_thread_for_email(db_connections['duckdb'], email_id).to_dict(orient='records')
-        return HTMLResponse(content=create_detail_fragment(email_meta, email_content[1], attachments, is_in_thread))
+        attachments = parsed_email.get("attachments")
+        email_content = parsed_email.get("body")
+        is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
+            orient="records"
+        )
+        return HTMLResponse(
+            content=create_detail_fragment(
+                email_meta, email_content[1], attachments, is_in_thread
+            )
+        )
     else:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
@@ -242,16 +271,20 @@ async def email_detail(email_id: str):
 async def email_thread_detail(thread_id: str):
     """HTMX route to load the detail pane content."""
 
-    thread_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(orient="records")
+    thread_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(
+        orient="records"
+    )
 
     if thread_meta:
         # for each email in thread
-        #email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_line_start'), thread_meta.get('email_line_end'))
-        #parsed_email = parse_email(email_raw_string)
-        #attachments = parsed_email.get('attachments')
-        #email_content = parsed_email.get('body')
-        #is_in_thread = get_thread_for_email(db_connections['duckdb'], the).to_dict(orient='records')
-        return HTMLResponse(content=create_thread_detail_fragment(None, None, None, thread_meta))
+        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_line_start'), thread_meta.get('email_line_end'))
+        # parsed_email = parse_email(email_raw_string)
+        # attachments = parsed_email.get('attachments')
+        # email_content = parsed_email.get('body')
+        # is_in_thread = get_thread_for_email(db_connections['duckdb'], the).to_dict(orient='records')
+        return HTMLResponse(
+            content=create_thread_detail_fragment(None, None, None, thread_meta)
+        )
     else:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
@@ -280,5 +313,4 @@ async def get_attachment(email_id: str, attachment_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("email_server:app", host="0.0.0.0", port=8000, reload=True)
