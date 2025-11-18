@@ -275,7 +275,7 @@ async def email_list(
     return HTMLResponse(content=html_fragments)
 
 
-@app.get("/api/email/{email_id}", response_class=HTMLResponse)
+@app.get("/api/email/{email_id:path}", response_class=HTMLResponse)
 async def email_detail(email_id: str):
     """HTMX route to load the detail pane content."""
 
@@ -332,7 +332,7 @@ async def email_thread_detail(thread_id: str):
         )
 
 
-@app.get("/api/attachment/{email_id}/{attachment_id}", response_class=Response)
+@app.get("/api/attachment/{email_id:path}/{attachment_id}", response_class=Response)
 async def get_attachment(email_id: str, attachment_id: str):
     """HTMX route to load the detail pane content."""
 
