@@ -142,8 +142,20 @@ def get_one_thread(db, thread_id):
     return rel.df()
 
 
-def get_email_count(db):
-    rel = db.execute("select count(distinct message_id) as email_count from emails")
+def get_email_count(db, additional_criteria=None):
+    if additional_criteria:
+        additional_conditions, where_statements = process_additional_criteria(additional_criteria)
+        if where_statements:
+            where_statement = " AND ".join(where_statements)
+            rel = db.execute(
+                f"with conditional_selection as (select * from emails where {where_statement} order by date desc)"
+                f"select count(distinct message_id) as email_count from conditional_selection",
+                additional_conditions
+            )
+        else:
+            rel = db.execute("select count(distinct message_id) as email_count from emails")
+    else:
+        rel = db.execute("select count(distinct message_id) as email_count from emails")
     df = rel.df()
     if not df.empty:
         return df.email_count.values[0]
@@ -361,6 +373,43 @@ def get_similar_vectors(db, vec):
     return rel.df()
 
 
+def process_additional_criteria(additional_criteria):
+    additional_conditions = []
+    where_statements = []
+    if additional_criteria:
+        # Email address filter
+        if "from" in additional_criteria:
+            where_statements.append("from_email like ?")
+            additional_conditions.append(
+                surround_with_wildcards(additional_criteria["from"])
+            )
+        if "subject" in additional_criteria:
+            where_statements.append("subject like ?")
+            additional_conditions.append(
+                surround_with_wildcards(additional_criteria["subject"])
+            )
+        if "label" in additional_criteria:
+            where_statements.append("? in labels")
+            additional_conditions.append(additional_criteria["label"])
+        else:
+            if excerpt := additional_criteria.get("excerpt"):
+                where_statements.append("excerpt like ?")
+                additional_conditions.append(surround_with_wildcards(excerpt))
+
+        # Date range filters
+        if (
+                "from_date" in additional_criteria
+                and additional_criteria["from_date"]
+        ):
+            where_statements.append("date >= ?")
+            additional_conditions.append(additional_criteria["from_date"])
+
+        if "to_date" in additional_criteria and additional_criteria["to_date"]:
+            where_statements.append("date <= ?")
+            additional_conditions.append(additional_criteria["to_date"])
+    return additional_conditions, where_statements
+
+
 def get_email_list(
     db, criteria=None, additional_criteria=None, sent=False, rag_message_ids=None
 ):
@@ -379,40 +428,7 @@ def get_email_list(
         return rel.df()
     else:
         if "limit" in criteria and "offset" in criteria:
-            additional_conditions = []
-            where_statements = []
-            if additional_criteria:
-                # Email address filter
-                if "from" in additional_criteria:
-                    where_statements.append("from_email like ?")
-                    additional_conditions.append(
-                        surround_with_wildcards(additional_criteria["from"])
-                    )
-                if "subject" in additional_criteria:
-                    where_statements.append("subject like ?")
-                    additional_conditions.append(
-                        surround_with_wildcards(additional_criteria["subject"])
-                    )
-                if "label" in additional_criteria:
-                    where_statements.append("? in labels")
-                    additional_conditions.append(additional_criteria["label"])
-                else:
-                    if excerpt := additional_criteria.get("excerpt"):
-                        where_statements.append("excerpt like ?")
-                        additional_conditions.append(surround_with_wildcards(excerpt))
-
-                # Date range filters
-                if (
-                    "from_date" in additional_criteria
-                    and additional_criteria["from_date"]
-                ):
-                    where_statements.append("date >= ?")
-                    additional_conditions.append(additional_criteria["from_date"])
-
-                if "to_date" in additional_criteria and additional_criteria["to_date"]:
-                    where_statements.append("date <= ?")
-                    additional_conditions.append(additional_criteria["to_date"])
-
+            additional_conditions, where_statements = process_additional_criteria(additional_criteria)
             # Sent folder filter
             if sent:
                 where_statements.append("? IN labels")

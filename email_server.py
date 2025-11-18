@@ -235,10 +235,10 @@ async def email_list(
 
     page_emails_df = get_email_list(
         db_connections["duckdb"],
-        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
+        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index} if rag_message_ids is None else {"limit": EMAILS_PER_PAGE, "offset": 0},
         additional_criteria=additional_criteria,
         sent=folder == "Sent",
-        rag_message_ids=rag_message_ids[start_index:EMAILS_PER_PAGE]["message_id"].tolist() if rag_message_ids is not None else None,
+        rag_message_ids=rag_message_ids[start_index:end_index]["message_id"].tolist() if rag_message_ids is not None else None,
     )
     if rag_message_ids is not None:
         page_emails_df = pd.merge(
@@ -246,7 +246,12 @@ async def email_list(
         ).sort_values(by="dist", ascending=True)
 
     page_emails = page_emails_df.to_dict(orient="records")
-    all_emails = get_email_count(db_connections["duckdb"]) # TODO this should reflect the size of the currently retrieved results
+    if rag_message_ids is not None:
+        all_emails = rag_message_ids.shape[0]
+    elif additional_criteria:
+        all_emails = get_email_count(db_connections["duckdb"], additional_criteria)
+    else:
+        all_emails = get_email_count(db_connections["duckdb"]) # TODO this should reflect the size of the currently retrieved results
     html_fragments = ""
 
     has_more = end_index < all_emails
