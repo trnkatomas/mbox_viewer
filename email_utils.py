@@ -38,7 +38,9 @@ EMAIL_DETAILS = [
 ]
 
 # Default MBOX file path - can be overridden with MBOX_FILE_PATH environment variable
-mboxfilename = os.getenv("MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox")
+mboxfilename = os.getenv(
+    "MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox"
+)
 
 
 class MboxReader:
@@ -345,18 +347,23 @@ def surround_with_wildcards(input):
 
 
 def get_similar_vectors(db, vec):
-    rel = db.execute("""SELECT *, array_distance(vec, ?::FLOAT[768]) as dist
+    rel = db.execute(
+        """SELECT *, array_distance(vec, ?::FLOAT[768]) as dist
     FROM
     embeddings
     ORDER
     BY
     dist
     LIMIT
-    20;""", [vec])
+    20;""",
+        [vec],
+    )
     return rel.df()
 
 
-def get_email_list(db, criteria=None, additional_criteria=None, sent=False, rag_message_ids=None):
+def get_email_list(
+    db, criteria=None, additional_criteria=None, sent=False, rag_message_ids=None
+):
     """
     Get email list with optional filtering.
 
@@ -388,22 +395,23 @@ def get_email_list(db, criteria=None, additional_criteria=None, sent=False, rag_
                     )
                 if "label" in additional_criteria:
                     where_statements.append("? in labels")
-                    additional_conditions.append(
-                        additional_criteria["label"]
-                    )
+                    additional_conditions.append(additional_criteria["label"])
                 else:
                     if excerpt := additional_criteria.get("excerpt"):
                         where_statements.append("excerpt like ?")
                         additional_conditions.append(surround_with_wildcards(excerpt))
 
                 # Date range filters
-                if "from_date" in additional_criteria and additional_criteria['from_date']:
+                if (
+                    "from_date" in additional_criteria
+                    and additional_criteria["from_date"]
+                ):
                     where_statements.append("date >= ?")
-                    additional_conditions.append(additional_criteria['from_date'])
+                    additional_conditions.append(additional_criteria["from_date"])
 
-                if "to_date" in additional_criteria and additional_criteria['to_date']:
+                if "to_date" in additional_criteria and additional_criteria["to_date"]:
                     where_statements.append("date <= ?")
-                    additional_conditions.append(additional_criteria['to_date'])
+                    additional_conditions.append(additional_criteria["to_date"])
 
             # Sent folder filter
             if sent:
@@ -411,7 +419,7 @@ def get_email_list(db, criteria=None, additional_criteria=None, sent=False, rag_
                 additional_conditions.append("Sent")
 
             # RAG search results filter
-            if not rag_message_ids.empty:
+            if rag_message_ids:
                 # Create placeholders for the IN clause
                 placeholders = ",".join(["?" for _ in rag_message_ids])
                 where_statements.append(f"message_id IN ({placeholders})")
@@ -477,17 +485,19 @@ def get_ollama_embedding(text, server_url=None, model=None):
 
     try:
         response = requests.post(
-            server_url,
-            json={'model': model, 'input': text},
-            timeout=30
+            server_url, json={"model": model, "input": text}, timeout=30
         )
         if response.status_code == 200:
             result = response.json()
             # Ollama returns embeddings in different formats depending on version
-            if 'embeddings' in result:
-                return result['embeddings'][0] if isinstance(result['embeddings'], list) else result['embeddings']
-            elif 'embedding' in result:
-                return result['embedding']
+            if "embeddings" in result:
+                return (
+                    result["embeddings"][0]
+                    if isinstance(result["embeddings"], list)
+                    else result["embeddings"]
+                )
+            elif "embedding" in result:
+                return result["embedding"]
             else:
                 logger.error(f"Unexpected Ollama response format: {result.keys()}")
                 return None
@@ -524,7 +534,8 @@ def rag_search_duckdb(db, query_text, n_results=50):
 
         # Perform vector similarity search using array_cosine_distance
         # Lower distance = more similar (0 = identical, 2 = opposite)
-        rel = db.execute("""
+        rel = db.execute(
+            """
             with dists as (
                 SELECT message_id, array_cosine_distance(vec, ?::FLOAT[768]) as dist
                 FROM embeddings
@@ -536,12 +547,16 @@ def rag_search_duckdb(db, query_text, n_results=50):
             dists on dists.message_id == emails.message_id 
             where dist < 0.5
             order by dist asc
-        """, [query_vec, n_results])
+        """,
+            [query_vec, n_results],
+        )
 
         results = rel.df()
-        logger.info(f"RAG search for '{query_text}' returned {results.shape[0]} results")
+        logger.info(
+            f"RAG search for '{query_text}' returned {results.shape[0]} results"
+        )
 
-        return results['message_id']
+        return results
 
     except Exception as e:
         logger.error(f"RAG search failed: {e}")
@@ -580,11 +595,13 @@ def process(drop_previous_table=False):
     if drop_previous_table:
         con.sql("drop table if exists emails")
         con.sql("drop table if exists embeddings")
-        con.sql("create table embeddings"
-                " (id integer,"
-                "  mbox_file_id text,"
-                "  message_id text," 
-                "  vec FLOAT[768])")
+        con.sql(
+            "create table embeddings"
+            " (id integer,"
+            "  mbox_file_id text,"
+            "  message_id text,"
+            "  vec FLOAT[768])"
+        )
         con.sql(
             "create table emails "
             "(i integer,"
@@ -605,7 +622,7 @@ def process(drop_previous_table=False):
         )
         con.close()
 
-    with (duckdb.connect("emails.db") as con):
+    with duckdb.connect("emails.db") as con:
         with MboxReader(mboxfilename) as mbox:
             for message, boundaries in tqdm.tqdm(mbox):
                 # print(message['From'], message['To'], message['Subject'], message['Date'], len(list(message.iter_parts())), len(list(message.iter_attachments())))
@@ -629,14 +646,16 @@ def process(drop_previous_table=False):
                 )
                 # the content should be chunked into ~ 500 tokens
                 d_encoded = ollama_embeddings(
-                            document_prefix + whole_text,
-                            "http://localhost:11434/api/embed",
-                            "embeddinggemma",
-                        )
-                vector_to_insert = [message['Message-ID'], mbox_file_hash, d_encoded]
+                    document_prefix + whole_text,
+                    "http://localhost:11434/api/embed",
+                    "embeddinggemma",
+                )
+                vector_to_insert = [message["Message-ID"], mbox_file_hash, d_encoded]
                 con.execute(
                     f"""insert into embeddings 
-                                (message_id, mbox_file_id, vec) values (?, ?, ?)""", vector_to_insert)
+                                (message_id, mbox_file_id, vec) values (?, ?, ?)""",
+                    vector_to_insert,
+                )
                 data_to_insert = [
                     message["From"],
                     message["To"],
@@ -678,7 +697,9 @@ def process(drop_previous_table=False):
 
         con.execute("INSTALL vss; LOAD vss")
         con.execute("SET hnsw_enable_experimental_persistence = TRUE;")
-        con.execute("CREATE INDEX cosine_idx ON embeddings USING HNSW (vec) WITH (metric = 'cosine')")
+        con.execute(
+            "CREATE INDEX cosine_idx ON embeddings USING HNSW (vec) WITH (metric = 'cosine')"
+        )
 
     print(res.df())
 
@@ -714,7 +735,7 @@ if __name__ == "__main__":
 
     parsed_args = arguments.parse_args()
 
-    #process(parsed_args.delete_table)
+    # process(parsed_args.delete_table)
     # be careful the database creation took an hour and a half
     process(drop_previous_table=False)
 

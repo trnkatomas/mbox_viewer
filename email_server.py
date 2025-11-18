@@ -8,6 +8,7 @@ from fastapi import FastAPI, Query, Request, status, Form
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import pandas as pd
 
 from email_utils import (
     EMAIL_DETAILS,
@@ -80,7 +81,7 @@ def create_list_item_fragment(
 def create_detail_fragment(email_meta, email_content, attachments, is_in_thread):
     """Generates the HTML for the email detail pane."""
     email_detail_template = templates.get_template("email_detail.jinja")
-    thread_id = is_in_thread[0].get('thread_id') if is_in_thread else None
+    thread_id = is_in_thread[0].get("thread_id") if is_in_thread else None
     output = email_detail_template.render(
         email_id=email_meta["message_id"],
         email_subject=email_meta["subject"],
@@ -90,7 +91,7 @@ def create_detail_fragment(email_meta, email_content, attachments, is_in_thread)
         has_attachment=email_meta["has_attachment"],
         attachments=attachments,
         thread=len(is_in_thread),
-        thread_id=thread_id
+        thread_id=thread_id,
     )
     return output
 
@@ -141,7 +142,7 @@ def parse_search_input(query: str):
         value = match[3] if match[3] else match[4]
         matches_dict.update({match[1]: value})
     remainder = [c for i, c in enumerate(query) if i not in to_discard]
-    matches_dict['excerpt'] = "".join(remainder).strip()
+    matches_dict["excerpt"] = "".join(remainder).strip()
     return matches_dict
 
 
@@ -220,23 +221,32 @@ async def email_list(
 
     # Handle RAG semantic search if rag: query provided
     rag_message_ids = None
-    if additional_criteria and 'rag' in additional_criteria:
+    if additional_criteria and "rag" in additional_criteria:
         from email_utils import rag_search_duckdb
-        rag_query = additional_criteria.pop('rag')  # Remove from criteria, handle separately
+
+        rag_query = additional_criteria.pop(
+            "rag"
+        )  # Remove from criteria, handle separately
         rag_message_ids = rag_search_duckdb(
             db_connections["duckdb"],
             rag_query,
-            n_results=100  # Get more RAG results, then filter/paginate
+            n_results=100,  # Get more RAG results, then filter/paginate
         )
 
-    page_emails = get_email_list(
+    page_emails_df = get_email_list(
         db_connections["duckdb"],
         criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
         additional_criteria=additional_criteria,
         sent=folder == "Sent",
-        rag_message_ids=rag_message_ids
-    ).to_dict(orient="records")
-    all_emails = get_email_count(db_connections["duckdb"])
+        rag_message_ids=rag_message_ids[start_index:EMAILS_PER_PAGE]["message_id"].tolist() if rag_message_ids is not None else None,
+    )
+    if rag_message_ids is not None:
+        page_emails_df = pd.merge(
+            page_emails_df, rag_message_ids[['message_id', 'dist']], on="message_id"
+        ).sort_values(by="dist", ascending=True)
+
+    page_emails = page_emails_df.to_dict(orient="records")
+    all_emails = get_email_count(db_connections["duckdb"]) # TODO this should reflect the size of the currently retrieved results
     html_fragments = ""
 
     has_more = end_index < all_emails
@@ -323,19 +333,20 @@ async def get_attachment(email_id: str, attachment_id: str):
 
     attachment = get_attachment_file(db_connections["duckdb"], email_id, attachment_id)
 
-    if not attachment or 'content' not in attachment:
+    if not attachment or "content" not in attachment:
         return Response(
             content="Attachment not found",
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
     return Response(
-            content=attachment['content'],
-            media_type=attachment['content_type'],
-            headers={'content-disposition': f'attachment; filename="{attachment_id}"'}
-        )
+        content=attachment["content"],
+        media_type=attachment["content_type"],
+        headers={"content-disposition": f'attachment; filename="{attachment_id}"'},
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("email_server:app", host="0.0.0.0", port=8000, reload=True)
