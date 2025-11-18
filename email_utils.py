@@ -151,7 +151,7 @@ def get_one_thread(db: duckdb.DuckDBPyConnection, thread_id: str) -> pd.DataFram
     return rel.df()
 
 
-def get_email_count(db, additional_criteria=None):
+def get_email_count(db: duckdb.DuckDBPyConnection, additional_criteria: Optional[Dict[str, str]] = None) -> int:
     if additional_criteria:
         additional_conditions, where_statements = process_additional_criteria(additional_criteria)
         if where_statements:
@@ -172,17 +172,17 @@ def get_email_count(db, additional_criteria=None):
         return 0
 
 
-def get_attachment_file(db, email_id, attachment_name):
-    email_data = get_one_email(db, email_id=email_id).to_dict(orient="records")
-    if isinstance(email_data, list) and email_data:
-        email_data = email_data[0]
+def get_attachment_file(db: duckdb.DuckDBPyConnection, email_id: str, attachment_name: str) -> Dict[str, Union[str, bytes, int]]:
+    email_data_list = get_one_email(db, email_id=email_id).to_dict(orient="records")
+    if isinstance(email_data_list, list) and email_data_list:
+        email_data = email_data_list[0]
         email_raw_string = get_string_email_from_mboxfile(
-            email_data.get("email_start"), email_data.get("email_end")
+            email_data.get("email_start"), email_data.get("email_end")  # type: ignore[arg-type]
         )
         attachments = parse_email(email_raw_string).get("attachments")
-        for a in attachments:
-            if attachment_name == a.get("filename"):
-                return a
+        for a in attachments:  # type: ignore[union-attr]
+            if attachment_name == a.get("filename"):  # type: ignore[union-attr]
+                return a  # type: ignore[return-value]
     return {}
 
 
@@ -394,7 +394,7 @@ def get_similar_vectors(
     return rel.df()
 
 
-def process_additional_criteria(additional_criteria):
+def process_additional_criteria(additional_criteria: Optional[Dict[str, str]]) -> Tuple[List[str], List[str]]:
     additional_conditions = []
     where_statements = []
     if additional_criteria:
@@ -432,8 +432,8 @@ def process_additional_criteria(additional_criteria):
 
 
 def get_email_list(
-    db, criteria=None, additional_criteria=None, sent=False, rag_message_ids=None
-):
+    db: duckdb.DuckDBPyConnection, criteria: Optional[Dict[str, int]] = None, additional_criteria: Optional[Dict[str, str]] = None, sent: bool = False, rag_message_ids: Optional[List[str]] = None
+) -> pd.DataFrame:
     """
     Get email list with optional filtering.
 
@@ -479,7 +479,7 @@ def get_email_list(
         return db.df()
 
 
-def load_email_content_search(db):
+def load_email_content_search(db: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     """
     Initialize DuckDB for vector search by installing and loading VSS extension.
 
@@ -500,7 +500,7 @@ def load_email_content_search(db):
     return db
 
 
-def get_ollama_embedding(text, server_url=None, model=None):
+def get_ollama_embedding(text: str, server_url: Optional[str] = None, model: Optional[str] = None) -> Optional[List[float]]:
     """
     Get embedding vector from Ollama server.
 
@@ -528,13 +528,10 @@ def get_ollama_embedding(text, server_url=None, model=None):
             result = response.json()
             # Ollama returns embeddings in different formats depending on version
             if "embeddings" in result:
-                return (
-                    result["embeddings"][0]
-                    if isinstance(result["embeddings"], list)
-                    else result["embeddings"]
-                )
+                emb = result["embeddings"][0] if isinstance(result["embeddings"], list) else result["embeddings"]
+                return emb  # type: ignore[no-any-return]
             elif "embedding" in result:
-                return result["embedding"]
+                return result["embedding"]  # type: ignore[no-any-return]
             else:
                 logger.error(f"Unexpected Ollama response format: {result.keys()}")
                 return None
@@ -546,7 +543,7 @@ def get_ollama_embedding(text, server_url=None, model=None):
         return None
 
 
-def rag_search_duckdb(db, query_text, n_results=50):
+def rag_search_duckdb(db: duckdb.DuckDBPyConnection, query_text: str, n_results: int = 50) -> pd.DataFrame:
     """
     Perform semantic search using DuckDB's VSS extension with cosine distance.
 
@@ -560,14 +557,14 @@ def rag_search_duckdb(db, query_text, n_results=50):
     """
     try:
         if not query_text:
-            return []
+            return pd.DataFrame()
 
         # Get embedding for the query (uses OLLAMA_URL env var)
         query_vec = get_ollama_embedding(query_prefix + query_text)
 
         if not query_vec:
             logger.warning("Failed to generate embedding for RAG search")
-            return []
+            return pd.DataFrame()
 
         # Perform vector similarity search using array_cosine_distance
         # Lower distance = more similar (0 = identical, 2 = opposite)
@@ -597,7 +594,7 @@ def rag_search_duckdb(db, query_text, n_results=50):
 
     except Exception as e:
         logger.error(f"RAG search failed: {e}")
-        return []
+        return pd.DataFrame()
 
 
 def process(drop_previous_table: bool = False) -> None:

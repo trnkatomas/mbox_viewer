@@ -30,6 +30,7 @@ from email_utils import (
 )
 
 if TYPE_CHECKING:
+    import chromadb
     import duckdb
 
 db_connections: Dict[str, Union["chromadb.Collection", "duckdb.DuckDBPyConnection"]] = {}
@@ -40,12 +41,13 @@ EMAILS_PER_PAGE = 5
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Load the database and initialize VSS extension
-    db_connections["duckdb"] = load_email_db()
-    db_connections["duckdb"] = load_email_content_search(db_connections["duckdb"])
+    db = load_email_db()
+    db_connections["duckdb"] = load_email_content_search(db)
     yield
     # Clean up the DB connections
     if duckdb_con := db_connections.get("duckdb"):
-        duckdb_con.close()  # type: ignore
+        if hasattr(duckdb_con, "close"):
+            duckdb_con.close()
     db_connections.clear()
 
 
@@ -178,7 +180,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
     """Route to serve the base HTML template."""
     stats_template = templates.get_template("stats.jinja")
 
-    basic_stats = get_basic_stats(db_connections["duckdb"])  # type: ignore
+    basic_stats = get_basic_stats(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]))
     all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails", 0)
     avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size", 0)
     first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
@@ -201,7 +203,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
 async def stats_data(query_name: str) -> Union[List[Dict[str, Union[str, int, float]]], Dict[str, str]]:
     """Route to serve the base HTML template."""
     if query_name == "dates_size":
-        basic_stats = get_email_sizes_in_time(db_connections["duckdb"])  # type: ignore
+        basic_stats = get_email_sizes_in_time(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]))
         if not basic_stats.empty:
             return basic_stats.to_dict(orient="records")  # type: ignore[return-value]
     return {}
@@ -243,7 +245,7 @@ async def email_list(
         additional_criteria = None
 
     # Handle RAG semantic search if rag: query provided
-    rag_message_ids = None
+    rag_message_ids: Optional[pd.DataFrame] = None
     if additional_criteria and "rag" in additional_criteria:
         from email_utils import rag_search_duckdb
 
@@ -251,30 +253,31 @@ async def email_list(
             "rag"
         )  # Remove from criteria, handle separately
         rag_message_ids = rag_search_duckdb(
-            db_connections["duckdb"],
+            cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]),
             rag_query,
             n_results=100,  # Get more RAG results, then filter/paginate
         )
 
+    db_conn = cast("duckdb.DuckDBPyConnection", db_connections["duckdb"])
     page_emails_df = get_email_list(
-        db_connections["duckdb"],
+        db_conn,
         criteria={"limit": EMAILS_PER_PAGE, "offset": start_index} if rag_message_ids is None else {"limit": EMAILS_PER_PAGE, "offset": 0},
         additional_criteria=additional_criteria,
         sent=folder == "Sent",
-        rag_message_ids=rag_message_ids[start_index:end_index]["message_id"].tolist() if rag_message_ids is not None else None,
+        rag_message_ids=rag_message_ids[start_index:end_index]["message_id"].tolist() if rag_message_ids is not None and not rag_message_ids.empty else None,
     )
-    if rag_message_ids is not None:
+    if rag_message_ids is not None and not rag_message_ids.empty:
         page_emails_df = pd.merge(
             page_emails_df, rag_message_ids[['message_id', 'dist']], on="message_id"
         ).sort_values(by="dist", ascending=True)
 
     page_emails = page_emails_df.to_dict(orient="records")
-    if rag_message_ids is not None:
+    if rag_message_ids is not None and not rag_message_ids.empty:
         all_emails = rag_message_ids.shape[0]
     elif additional_criteria:
-        all_emails = get_email_count(db_connections["duckdb"], additional_criteria)
+        all_emails = get_email_count(db_conn, additional_criteria)
     else:
-        all_emails = get_email_count(db_connections["duckdb"]) # TODO this should reflect the size of the currently retrieved results
+        all_emails = get_email_count(db_conn) # TODO this should reflect the size of the currently retrieved results
     html_fragments = ""
 
     has_more = end_index < all_emails
@@ -310,7 +313,7 @@ async def email_list(
 async def email_detail(email_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
 
-    email_meta_list = get_one_email(db_connections["duckdb"], email_id).to_dict(  # type: ignore
+    email_meta_list = get_one_email(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), email_id).to_dict(
         orient="records"
     )
     if isinstance(email_meta_list, list) and email_meta_list:
@@ -322,18 +325,25 @@ async def email_detail(email_id: str) -> HTMLResponse:
         )
 
     if email_meta:
-        email_raw_string = get_string_email_from_mboxfile(
-            email_meta.get("email_start"), email_meta.get("email_end")
-        )
+        email_start = email_meta.get("email_start")
+        email_end = email_meta.get("email_end")
+        if isinstance(email_start, int) and isinstance(email_end, int):
+            email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
+        else:
+            return HTMLResponse(
+                content="<div class='p-8 text-center text-red-400'>Error: Invalid email boundaries.</div>",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
         parsed_email = parse_email(email_raw_string)
         attachments = parsed_email.get("attachments")
         email_content = parsed_email.get("body")
-        is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
+        is_in_thread = get_thread_for_email(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), email_id).to_dict(
             orient="records"
         )
         return HTMLResponse(
             content=create_detail_fragment(
-                email_meta, email_content[1], attachments, is_in_thread,  # type: ignore
+                email_meta, email_content[1], attachments, is_in_thread,  # type: ignore[index, arg-type]
             )
         )
     else:
@@ -347,7 +357,7 @@ async def email_detail(email_id: str) -> HTMLResponse:
 async def email_thread_detail(thread_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
 
-    thread_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(  # type: ignore
+    thread_meta = get_one_thread(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), thread_id).to_dict(
         orient="records"
     )
 
@@ -372,7 +382,7 @@ async def email_thread_detail(thread_id: str) -> HTMLResponse:
 async def get_attachment(email_id: str, attachment_id: str) -> Response:
     """HTMX route to load the detail pane content."""
 
-    attachment = get_attachment_file(db_connections["duckdb"], email_id, attachment_id)  # type: ignore
+    attachment = get_attachment_file(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), email_id, attachment_id)
 
     if not attachment or "content" not in attachment:
         return Response(
