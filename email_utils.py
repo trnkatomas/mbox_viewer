@@ -9,6 +9,8 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from readabilipy import simple_json_from_html_string
+import email
+from email.policy import default
 from email.parser import BytesParser
 import textwrap
 import io
@@ -40,7 +42,9 @@ EMAIL_DETAILS = [
 ]
 
 # Default MBOX file path - can be overridden with MBOX_FILE_PATH environment variable
-mboxfilename = os.getenv("MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox")
+mboxfilename = os.getenv(
+    "MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox"
+)
 
 
 class MboxReader:
@@ -110,7 +114,7 @@ def get_basic_stats(db: duckdb.DuckDBPyConnection) -> List[pd.DataFrame]:
         "select count(distinct message_id) as all_emails from emails limit 1"
     ).df()
     all_size = db.execute(
-        "select avg(email_line_end - email_line_start) as avg_size from emails limit 1"
+        "select avg(email_end - email_start) as avg_size from emails limit 1"
     ).df()
     all_timespan = db.execute(
         "select min(date) as first_seen, max(date) as last_seen from emails limit 1"
@@ -121,7 +125,7 @@ def get_basic_stats(db: duckdb.DuckDBPyConnection) -> List[pd.DataFrame]:
 def get_email_sizes_in_time(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     stats_query = """
     with raw_data as (
-        select 1 as dummy, date_trunc('month', date) as mmonth, (email_line_end-email_line_start) as size from emails
+        select 1 as dummy, date_trunc('month', date) as mmonth, (email_end-email_start) as size from emails
     ),
     monthly_sizes as (
         select mmonth, sum(size) as sizes from raw_data group by mmonth
@@ -147,8 +151,20 @@ def get_one_thread(db: duckdb.DuckDBPyConnection, thread_id: str) -> pd.DataFram
     return rel.df()
 
 
-def get_email_count(db: duckdb.DuckDBPyConnection) -> int:
-    rel = db.execute("select count(distinct message_id) as email_count from emails")
+def get_email_count(db, additional_criteria=None):
+    if additional_criteria:
+        additional_conditions, where_statements = process_additional_criteria(additional_criteria)
+        if where_statements:
+            where_statement = " AND ".join(where_statements)
+            rel = db.execute(
+                f"with conditional_selection as (select * from emails where {where_statement} order by date desc)"
+                f"select count(distinct message_id) as email_count from conditional_selection",
+                additional_conditions
+            )
+        else:
+            rel = db.execute("select count(distinct message_id) as email_count from emails")
+    else:
+        rel = db.execute("select count(distinct message_id) as email_count from emails")
     df = rel.df()
     if not df.empty:
         return int(df.email_count.values[0])
@@ -156,24 +172,17 @@ def get_email_count(db: duckdb.DuckDBPyConnection) -> int:
         return 0
 
 
-def get_attachment_file(
-    db: duckdb.DuckDBPyConnection, email_id: str, attachment_name: str
-) -> Dict[str, Union[str, bytes, int]]:
-    email_data_list = get_one_email(db, email_id=email_id).to_dict(orient="records")
-    if isinstance(email_data_list, list) and email_data_list:
-        email_data = email_data_list[0]
-        email_line_start = email_data.get("email_line_start")
-        email_line_end = email_data.get("email_line_end")
-        if isinstance(email_line_start, int) and isinstance(email_line_end, int):
-            email_raw_string = get_string_email_from_mboxfile(
-                email_line_start, email_line_end
-            )
-            parsed = parse_email(email_raw_string)
-            attachments_raw = parsed.get("attachments")
-            if isinstance(attachments_raw, list):
-                for a in attachments_raw:
-                    if isinstance(a, dict) and attachment_name == a.get("filename"):
-                        return a
+def get_attachment_file(db, email_id, attachment_name):
+    email_data = get_one_email(db, email_id=email_id).to_dict(orient="records")
+    if isinstance(email_data, list) and email_data:
+        email_data = email_data[0]
+        email_raw_string = get_string_email_from_mboxfile(
+            email_data.get("email_start"), email_data.get("email_end")
+        )
+        attachments = parse_email(email_raw_string).get("attachments")
+        for a in attachments:
+            if attachment_name == a.get("filename"):
+                return a
     return {}
 
 
@@ -379,48 +388,81 @@ def get_similar_vectors(
     BY
     dist
     LIMIT
-    20;""", [vec])
+    20;""",
+        [vec],
+    )
     return rel.df()
 
 
+def process_additional_criteria(additional_criteria):
+    additional_conditions = []
+    where_statements = []
+    if additional_criteria:
+        # Email address filter
+        if "from" in additional_criteria:
+            where_statements.append("from_email like ?")
+            additional_conditions.append(
+                surround_with_wildcards(additional_criteria["from"])
+            )
+        if "subject" in additional_criteria:
+            where_statements.append("subject like ?")
+            additional_conditions.append(
+                surround_with_wildcards(additional_criteria["subject"])
+            )
+        if "label" in additional_criteria:
+            where_statements.append("? in labels")
+            additional_conditions.append(additional_criteria["label"])
+        else:
+            if excerpt := additional_criteria.get("excerpt"):
+                where_statements.append("excerpt like ?")
+                additional_conditions.append(surround_with_wildcards(excerpt))
+
+        # Date range filters
+        if (
+                "from_date" in additional_criteria
+                and additional_criteria["from_date"]
+        ):
+            where_statements.append("date >= ?")
+            additional_conditions.append(additional_criteria["from_date"])
+
+        if "to_date" in additional_criteria and additional_criteria["to_date"]:
+            where_statements.append("date <= ?")
+            additional_conditions.append(additional_criteria["to_date"])
+    return additional_conditions, where_statements
+
+
 def get_email_list(
-    db: duckdb.DuckDBPyConnection,
-    criteria: Optional[Dict[str, int]] = None,
-    additional_criteria: Optional[Dict[str, str]] = None,
-    sent: bool = False,
-) -> pd.DataFrame:
+    db, criteria=None, additional_criteria=None, sent=False, rag_message_ids=None
+):
+    """
+    Get email list with optional filtering.
+
+    Args:
+        db: DuckDB connection
+        criteria: Dict with 'limit' and 'offset' for pagination
+        additional_criteria: Dict with search filters (from, subject, excerpt, from_date, to_date)
+        sent: Boolean to filter for sent emails
+        rag_message_ids: List of message IDs from RAG search to filter by
+    """
     if not criteria:
         rel = db.sql("select * from emails order by date desc limit 30")
-        # return db.fetchall()
         return rel.df()
     else:
         if "limit" in criteria and "offset" in criteria:
-            additional_conditions = []
-            where_statements = []
-            if additional_criteria:
-                # todo check validity
-                if "from" in additional_criteria:
-                    where_statements.append("from_email like ?")
-                    additional_conditions.append(
-                        surround_with_wildcards(additional_criteria["from"])
-                    )
-                if "subject" in additional_criteria:
-                    where_statements.append("subject like ?")
-                    additional_conditions.append(
-                        surround_with_wildcards(additional_criteria["subject"])
-                    )
-                if "label" in additional_criteria:
-                    where_statements.append("? in labels")
-                    additional_conditions.append(
-                        additional_criteria["label"]
-                    )
-                else:
-                    if excerpt := additional_criteria.get("excerpt"):
-                        where_statements.append("excerpt like ?")
-                        additional_conditions.append(surround_with_wildcards(excerpt))
+            additional_conditions, where_statements = process_additional_criteria(additional_criteria)
+            # Sent folder filter
             if sent:
                 where_statements.append("? IN labels")
                 additional_conditions.append("Sent")
+
+            # RAG search results filter
+            if rag_message_ids:
+                # Create placeholders for the IN clause
+                placeholders = ",".join(["?" for _ in rag_message_ids])
+                where_statements.append(f"message_id IN ({placeholders})")
+                additional_conditions.extend(rag_message_ids)
+
+            # Execute query
             if where_statements:
                 where_statement = " AND ".join(where_statements)
                 db.execute(
@@ -437,10 +479,125 @@ def get_email_list(
         return db.df()
 
 
-def load_email_content_search(email_embeddings_name: str = "emails.chromadb") -> chromadb.Collection:
-    chroma_client = chromadb.PersistentClient(path="emails.chromadb")
-    emails_collection = chroma_client.get_or_create_collection(name="emails")
-    return emails_collection
+def load_email_content_search(db):
+    """
+    Initialize DuckDB for vector search by installing and loading VSS extension.
+
+    Args:
+        db: DuckDB connection
+
+    Returns:
+        The same db connection with VSS loaded
+    """
+    try:
+        # Install and load the VSS extension for vector similarity search
+        db.execute("INSTALL vss;")
+        db.execute("LOAD vss;")
+        logger.info("DuckDB VSS extension loaded successfully")
+    except Exception as e:
+        logger.warning(f"VSS extension may already be installed: {e}")
+
+    return db
+
+
+def get_ollama_embedding(text, server_url=None, model=None):
+    """
+    Get embedding vector from Ollama server.
+
+    Args:
+        text: Text to embed
+        server_url: Ollama API endpoint (defaults to OLLAMA_URL env var or http://localhost:11434/api/embed)
+        model: Embedding model to use (defaults to OLLAMA_MODEL env var or nomic-embed-text)
+
+    Returns:
+        List of floats representing the embedding vector, or None on failure
+    """
+    import requests
+
+    # Get configuration from environment variables if not provided
+    if server_url is None:
+        server_url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/embed")
+    if model is None:
+        model = os.getenv("OLLAMA_MODEL", "embeddinggemma")
+
+    try:
+        response = requests.post(
+            server_url, json={"model": model, "input": text}, timeout=30
+        )
+        if response.status_code == 200:
+            result = response.json()
+            # Ollama returns embeddings in different formats depending on version
+            if "embeddings" in result:
+                return (
+                    result["embeddings"][0]
+                    if isinstance(result["embeddings"], list)
+                    else result["embeddings"]
+                )
+            elif "embedding" in result:
+                return result["embedding"]
+            else:
+                logger.error(f"Unexpected Ollama response format: {result.keys()}")
+                return None
+        else:
+            logger.error(f"Ollama embedding failed with status {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to get embedding from Ollama: {e}")
+        return None
+
+
+def rag_search_duckdb(db, query_text, n_results=50):
+    """
+    Perform semantic search using DuckDB's VSS extension with cosine distance.
+
+    Args:
+        db: DuckDB connection with VSS loaded
+        query_text: The search query text
+        n_results: Number of results to return (default 50)
+
+    Returns:
+        List of message IDs from semantically similar emails
+    """
+    try:
+        if not query_text:
+            return []
+
+        # Get embedding for the query (uses OLLAMA_URL env var)
+        query_vec = get_ollama_embedding(query_prefix + query_text)
+
+        if not query_vec:
+            logger.warning("Failed to generate embedding for RAG search")
+            return []
+
+        # Perform vector similarity search using array_cosine_distance
+        # Lower distance = more similar (0 = identical, 2 = opposite)
+        rel = db.execute(
+            """
+            with dists as (
+                SELECT message_id, array_cosine_distance(vec, ?::FLOAT[768]) as dist
+                FROM embeddings
+                ORDER BY dist ASC
+                LIMIT ?
+            )
+            select emails.message_id, subject, dists.dist
+            from emails join
+            dists on dists.message_id == emails.message_id 
+            where dist < 0.5
+            order by dist asc
+        """,
+            [query_vec, n_results],
+        )
+
+        results = rel.df()
+        logger.info(
+            f"RAG search for '{query_text}' returned {results.shape[0]} results"
+        )
+
+        return results
+
+    except Exception as e:
+        logger.error(f"RAG search failed: {e}")
+        return []
 
 
 def process(drop_previous_table: bool = False) -> None:
@@ -475,11 +632,13 @@ def process(drop_previous_table: bool = False) -> None:
     if drop_previous_table:
         con.sql("drop table if exists emails")
         con.sql("drop table if exists embeddings")
-        con.sql("create table embeddings"
-                " (id integer,"
-                "  mbox_file_id text,"
-                "  message_id text," 
-                "  vec FLOAT[768])")
+        con.sql(
+            "create table embeddings"
+            " (id integer,"
+            "  mbox_file_id text,"
+            "  message_id text,"
+            "  vec FLOAT[768])"
+        )
         con.sql(
             "create table emails "
             "(i integer,"
@@ -500,7 +659,7 @@ def process(drop_previous_table: bool = False) -> None:
         )
         con.close()
 
-    with (duckdb.connect("emails.db") as con):
+    with duckdb.connect("emails.db") as con:
         with MboxReader(mboxfilename) as mbox:
             for message, boundaries in tqdm.tqdm(mbox):
                 # print(message['From'], message['To'], message['Subject'], message['Date'], len(list(message.iter_parts())), len(list(message.iter_attachments())))
@@ -524,14 +683,16 @@ def process(drop_previous_table: bool = False) -> None:
                 )
                 # the content should be chunked into ~ 500 tokens
                 d_encoded = ollama_embeddings(
-                            document_prefix + whole_text,
-                            "http://localhost:11434/api/embed",
-                            "embeddinggemma",
-                        )
-                vector_to_insert = [message['Message-ID'], mbox_file_hash, d_encoded]
+                    document_prefix + whole_text,
+                    "http://localhost:11434/api/embed",
+                    "embeddinggemma",
+                )
+                vector_to_insert = [message["Message-ID"], mbox_file_hash, d_encoded]
                 con.execute(
                     f"""insert into embeddings 
-                                (message_id, mbox_file_id, vec) values (?, ?, ?)""", vector_to_insert)
+                                (message_id, mbox_file_id, vec) values (?, ?, ?)""",
+                    vector_to_insert,
+                )
                 data_to_insert = [
                     message["From"],
                     message["To"],
@@ -573,7 +734,9 @@ def process(drop_previous_table: bool = False) -> None:
 
         con.execute("INSTALL vss; LOAD vss")
         con.execute("SET hnsw_enable_experimental_persistence = TRUE;")
-        con.execute("CREATE INDEX cosine_idx ON embeddings USING HNSW (vec) WITH (metric = 'cosine')")
+        con.execute(
+            "CREATE INDEX cosine_idx ON embeddings USING HNSW (vec) WITH (metric = 'cosine')"
+        )
 
     print(res.df())
 
@@ -611,7 +774,7 @@ if __name__ == "__main__":
 
     parsed_args = arguments.parse_args()
 
-    #process(parsed_args.delete_table)
+    # process(parsed_args.delete_table)
     # be careful the database creation took an hour and a half
     process(drop_previous_table=False)
 

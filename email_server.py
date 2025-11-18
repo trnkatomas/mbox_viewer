@@ -10,6 +10,7 @@ from fastapi import FastAPI, Query, Request, status, Form
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import pandas as pd
 
 from email_utils import (
     EMAIL_DETAILS,
@@ -29,7 +30,6 @@ from email_utils import (
 )
 
 if TYPE_CHECKING:
-    import chromadb
     import duckdb
 
 db_connections: Dict[str, Union["chromadb.Collection", "duckdb.DuckDBPyConnection"]] = {}
@@ -39,9 +39,9 @@ EMAILS_PER_PAGE = 5
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # Load the ML model
+    # Load the database and initialize VSS extension
     db_connections["duckdb"] = load_email_db()
-    db_connections["chromadb"] = load_email_content_search()
+    db_connections["duckdb"] = load_email_content_search(db_connections["duckdb"])
     yield
     # Clean up the DB connections
     if duckdb_con := db_connections.get("duckdb"):
@@ -133,7 +133,17 @@ def create_thread_detail_fragment(
 
 
 def parse_search_input(query: str) -> Dict[str, str]:
-    regex = r"(from|subject|rag|label):(\"(.*)\"|([^ \n]+))"
+    """
+    Parse search query for special filters.
+
+    Supported filters:
+    - from:email - Filter by sender
+    - subject:text - Filter by subject
+    - rag:text - Semantic search
+    - from_date:YYYY-MM-DD - Filter from date
+    - to_date:YYYY-MM-DD - Filter to date
+    """
+    regex = r"(from|subject|rag|from_date|to_date|label):(\"(.*)\"|([^ \n]+))"
     matches = re.finditer(regex, query, re.MULTILINE)
     matches_dict: Dict[str, str] = {}
     to_discard: List[int] = []
@@ -147,9 +157,11 @@ def parse_search_input(query: str) -> Dict[str, str]:
             )
         )
         to_discard.extend(list(range(match.start(), match.end())))
-        matches_dict.update({match[1]: match[2]})
+        # Extract the value (either quoted or unquoted)
+        value = match[3] if match[3] else match[4]
+        matches_dict.update({match[1]: value})
     remainder = [c for i, c in enumerate(query) if i not in to_discard]
-    matches_dict["excerpt"] = "".join(remainder)
+    matches_dict["excerpt"] = "".join(remainder).strip()
     return matches_dict
 
 
@@ -224,18 +236,45 @@ async def email_list(
     start_index = (page - 1) * EMAILS_PER_PAGE
     end_index = start_index + EMAILS_PER_PAGE
 
+    # Parse search query if provided
     if query:
         additional_criteria = parse_search_input(query)
     else:
         additional_criteria = None
 
-    page_emails = get_email_list(
-        db_connections["duckdb"],  # type: ignore
-        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index},
+    # Handle RAG semantic search if rag: query provided
+    rag_message_ids = None
+    if additional_criteria and "rag" in additional_criteria:
+        from email_utils import rag_search_duckdb
+
+        rag_query = additional_criteria.pop(
+            "rag"
+        )  # Remove from criteria, handle separately
+        rag_message_ids = rag_search_duckdb(
+            db_connections["duckdb"],
+            rag_query,
+            n_results=100,  # Get more RAG results, then filter/paginate
+        )
+
+    page_emails_df = get_email_list(
+        db_connections["duckdb"],
+        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index} if rag_message_ids is None else {"limit": EMAILS_PER_PAGE, "offset": 0},
         additional_criteria=additional_criteria,
         sent=folder == "Sent",
-    ).to_dict(orient="records")
-    all_emails = get_email_count(db_connections["duckdb"])  # type: ignore
+        rag_message_ids=rag_message_ids[start_index:end_index]["message_id"].tolist() if rag_message_ids is not None else None,
+    )
+    if rag_message_ids is not None:
+        page_emails_df = pd.merge(
+            page_emails_df, rag_message_ids[['message_id', 'dist']], on="message_id"
+        ).sort_values(by="dist", ascending=True)
+
+    page_emails = page_emails_df.to_dict(orient="records")
+    if rag_message_ids is not None:
+        all_emails = rag_message_ids.shape[0]
+    elif additional_criteria:
+        all_emails = get_email_count(db_connections["duckdb"], additional_criteria)
+    else:
+        all_emails = get_email_count(db_connections["duckdb"]) # TODO this should reflect the size of the currently retrieved results
     html_fragments = ""
 
     has_more = end_index < all_emails
@@ -282,30 +321,25 @@ async def email_detail(email_id: str) -> HTMLResponse:
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
-    email_raw_string = get_string_email_from_mboxfile(
-        int(email_meta.get("email_line_start", 0)),
-        int(email_meta.get("email_line_end", 0)),
-    )
-    parsed_email = parse_email(email_raw_string)
-    attachments = parsed_email.get("attachments", [])
-    email_body = parsed_email.get("body", ("", None))
-    is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(  # type: ignore
-        orient="records"
-    )
-
-    if isinstance(attachments, list) and isinstance(email_body, tuple):
+    if email_meta:
+        email_raw_string = get_string_email_from_mboxfile(
+            email_meta.get("email_start"), email_meta.get("email_end")
+        )
+        parsed_email = parse_email(email_raw_string)
+        attachments = parsed_email.get("attachments")
+        email_content = parsed_email.get("body")
+        is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
+            orient="records"
+        )
         return HTMLResponse(
             content=create_detail_fragment(
-                email_meta,
-                email_body[1],
-                attachments,
-                is_in_thread,  # type: ignore
+                email_meta, email_content[1], attachments, is_in_thread,  # type: ignore
             )
         )
     else:
         return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Failed to parse email.</div>",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
+            status_code=status.HTTP_404_NOT_FOUND,
         )
 
 
@@ -319,7 +353,7 @@ async def email_thread_detail(thread_id: str) -> HTMLResponse:
 
     if thread_meta:
         # for each email in thread
-        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_line_start'), thread_meta.get('email_line_end'))
+        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_start'), thread_meta.get('email_end'))
         # parsed_email = parse_email(email_raw_string)
         # attachments = parsed_email.get('attachments')
         # email_content = parsed_email.get('body')

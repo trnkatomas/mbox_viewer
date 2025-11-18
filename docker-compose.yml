@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # Ollama service for embeddings
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mbox-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    # Optional: Add GPU support if available
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # MBOX Viewer application
+  mbox-viewer:
+    build: .
+    container_name: mbox-viewer-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./emails.db:/app/emails.db
+      - ./mbox_files:/app/mbox_files:ro
+    environment:
+      - MBOX_FILE_PATH=/app/mbox_files/emails.mbox
+      - OLLAMA_URL=http://ollama:11434/api/embed
+      - OLLAMA_MODEL=nomic-embed-text
+    depends_on:
+      - ollama
+    restart: unless-stopped
+    command: uvicorn email_server:app --host 0.0.0.0 --port 8000
+
+volumes:
+  ollama_data:
+    driver: local
