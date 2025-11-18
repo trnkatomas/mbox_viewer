@@ -1,8 +1,12 @@
 import email
+from email.message import Message
 from email.policy import default
 import os
+from typing import Dict, List, Optional, Tuple, Union, Generator
+from types import TracebackType
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from readabilipy import simple_json_from_html_string
 from email.parser import BytesParser
@@ -40,23 +44,28 @@ mboxfilename = os.getenv("MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_e
 
 
 class MboxReader:
-    def __init__(self, filename):
+    def __init__(self, filename: str) -> None:
         self.handle = open(filename, "rb")
         assert self.handle.readline().startswith(b"From ")
         # move the position in file back to zero
         self.handle.seek(0)
 
-    def __enter__(self):
+    def __enter__(self) -> "MboxReader":
         return self
 
-    def __exit__(self, exc_type, exc_value, exc_traceback):
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_value: Optional[BaseException],
+        exc_traceback: Optional[TracebackType],
+    ) -> None:
         self.handle.close()
 
-    def __iter__(self):
+    def __iter__(self) -> Generator[Tuple[Message, Tuple[int, int]], None, None]:
         return iter(self.__next__())
 
-    def __next__(self):
-        lines = []
+    def __next__(self) -> Generator[Tuple[Message, Tuple[int, int]], None, None]:
+        lines: List[bytes] = []
         line_counter = 0
         bytes_start_counter = 0
         bytes_end_counter = 0
@@ -78,7 +87,7 @@ class MboxReader:
             bytes_end_counter += len(line)
 
 
-def to_string(_content):
+def to_string(_content: Union[bytes, bytearray, str]) -> str:
     if isinstance(_content, (bytes, bytearray)):
         string_content = _content.decode("ascii", errors="ignore")
     else:
@@ -86,17 +95,17 @@ def to_string(_content):
     return string_content
 
 
-def load_email_db(db_name="emails.db"):
+def load_email_db(db_name: str = "emails.db") -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(db_name, read_only=True)
     return con
 
 
-def get_one_email(db, email_id):
+def get_one_email(db: duckdb.DuckDBPyConnection, email_id: str) -> pd.DataFrame:
     rel = db.execute("select * from emails where message_id == ? limit 1", [email_id])
     return rel.df()
 
 
-def get_basic_stats(db):
+def get_basic_stats(db: duckdb.DuckDBPyConnection) -> List[pd.DataFrame]:
     all_emails = db.execute(
         "select count(distinct message_id) as all_emails from emails limit 1"
     ).df()
@@ -109,7 +118,7 @@ def get_basic_stats(db):
     return [all_emails, all_size, all_timespan]
 
 
-def get_email_sizes_in_time(db):
+def get_email_sizes_in_time(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     stats_query = """
     with raw_data as (
         select 1 as dummy, date_trunc('month', date) as mmonth, (email_line_end-email_line_start) as size from emails
@@ -123,50 +132,57 @@ def get_email_sizes_in_time(db):
     return results
 
 
-def get_thread_for_email(db, email_id):
+def get_thread_for_email(db: duckdb.DuckDBPyConnection, email_id: str) -> pd.DataFrame:
     email_from_db = get_one_email(db, email_id)
     if not email_from_db.empty:
-        email_from_db = email_from_db.to_dict(orient="records")[0]
-        thread_id = email_from_db["thread_id"]
-        return get_one_thread(db, thread_id)
-    else:
-        return pd.DataFrame()
+        email_dict = email_from_db.to_dict(orient="records")[0]
+        thread_id_val = email_dict.get("thread_id")
+        if isinstance(thread_id_val, str):
+            return get_one_thread(db, thread_id_val)
+    return pd.DataFrame()
 
 
-def get_one_thread(db, thread_id):
+def get_one_thread(db: duckdb.DuckDBPyConnection, thread_id: str) -> pd.DataFrame:
     rel = db.execute("select * from emails where thread_id == ?", [thread_id])
     return rel.df()
 
 
-def get_email_count(db):
+def get_email_count(db: duckdb.DuckDBPyConnection) -> int:
     rel = db.execute("select count(distinct message_id) as email_count from emails")
     df = rel.df()
     if not df.empty:
-        return df.email_count.values[0]
+        return int(df.email_count.values[0])
     else:
         return 0
 
 
-def get_attachment_file(db, email_id, attachment_name):
-    email_data = get_one_email(db, email_id=email_id).to_dict(orient="records")
-    if isinstance(email_data, list) and email_data:
-        email_data = email_data[0]
-        email_raw_string = get_string_email_from_mboxfile(
-            email_data.get("email_line_start"), email_data.get("email_line_end")
-        )
-        attachments = parse_email(email_raw_string).get("attachments")
-        for a in attachments:
-            if attachment_name == a.get("filename"):
-                return a
+def get_attachment_file(
+    db: duckdb.DuckDBPyConnection, email_id: str, attachment_name: str
+) -> Dict[str, Union[str, bytes, int]]:
+    email_data_list = get_one_email(db, email_id=email_id).to_dict(orient="records")
+    if isinstance(email_data_list, list) and email_data_list:
+        email_data = email_data_list[0]
+        email_line_start = email_data.get("email_line_start")
+        email_line_end = email_data.get("email_line_end")
+        if isinstance(email_line_start, int) and isinstance(email_line_end, int):
+            email_raw_string = get_string_email_from_mboxfile(
+                email_line_start, email_line_end
+            )
+            parsed = parse_email(email_raw_string)
+            attachments_raw = parsed.get("attachments")
+            if isinstance(attachments_raw, list):
+                for a in attachments_raw:
+                    if isinstance(a, dict) and attachment_name == a.get("filename"):
+                        return a
     return {}
 
 
-def _extract_attachments(msg):
+def _extract_attachments(msg: Message) -> List[Dict[str, Union[str, bytes, int]]]:
     """
     Internal function to iterate and extract all attachment parts.
     Returns the full decoded binary content in the 'content' field.
     """
-    attachments = []
+    attachments: List[Dict[str, Union[str, bytes, int]]] = []
 
     # Iterate through all parts of the email
     for i, part in enumerate(msg.walk()):
@@ -190,7 +206,13 @@ def _extract_attachments(msg):
 
             try:
                 # get_payload(decode=True) extracts the raw, decoded binary content
-                payload = part.get_payload(decode=True)
+                payload_raw = part.get_payload(decode=True)
+                if payload_raw is None:
+                    payload = b"[Empty attachment content]"
+                elif isinstance(payload_raw, bytes):
+                    payload = payload_raw
+                else:
+                    payload = str(payload_raw).encode("utf-8")
             except Exception as e:
                 logger.error(f"Error decoding attachment content for {filename}: {e}")
                 payload = f"[Error decoding attachment content: {e}]".encode("utf-8")
@@ -211,23 +233,24 @@ def _extract_attachments(msg):
     return attachments
 
 
-def _extract_body_content(msg):
+def _extract_body_content(msg: Message) -> Tuple[str, Optional[str]]:
     """
     Internal function to extract and prioritize HTML or plain text body.
     Priority: HTML > Plain Text.
     Returns: A tuple (body_type, body_content_string)
     """
-    email_body_html = None
-    email_body_text = None
+    email_body_html: Optional[str] = None
+    email_body_text: Optional[str] = None
 
     for i, part in enumerate(msg.walk()):
         # Skip container parts or parts clearly identified as attachments
+        content_disposition = part.get("Content-Disposition")
         if (
             part.is_multipart()
             or part.get_filename()
             or (
-                part.get("Content-Disposition")
-                and part.get("Content-Disposition").startswith("attachment")
+                content_disposition is not None
+                and content_disposition.startswith("attachment")
             )
         ):
             continue
@@ -240,7 +263,11 @@ def _extract_body_content(msg):
         if is_body_part:
             try:
                 # .get_content() automatically decodes the payload into a string
-                content = part.get_content()
+                content_raw = part.get_content()  # type: ignore[attr-defined]
+                if isinstance(content_raw, str):
+                    content = content_raw
+                else:
+                    content = str(content_raw)
             except Exception as e:
                 logger.error(
                     f"Error decoding body content (Part {i:02d}, Type {content_type}): {e}"
@@ -271,7 +298,9 @@ def _extract_body_content(msg):
 # --- Main Library Function ---
 
 
-def parse_email(raw_email: bytes):
+def parse_email(
+    raw_email: bytes,
+) -> Dict[str, Union[Tuple[str, Optional[str]], List[Dict[str, Union[str, bytes, int]]]]]:
     """
     Parses a raw email string to extract prioritized body content and all attachments.
 
@@ -302,14 +331,14 @@ def parse_email(raw_email: bytes):
     return {"body": body_info, "attachments": attachments_list}
 
 
-def get_string_email_from_mboxfile(email_start, email_end):
+def get_string_email_from_mboxfile(email_start: int, email_end: int) -> bytes:
     with open(mboxfilename, "rb") as infile:
         infile.seek(email_start)
         data = infile.read(email_end - email_start)
         return data
 
 
-def get_email_content(email_start, email_end):
+def get_email_content(email_start: int, email_end: int) -> str:
     with open(mboxfilename, "rb") as infile:
         infile.seek(email_start)
         data = infile.read(email_end - email_start)
@@ -321,10 +350,8 @@ def get_email_content(email_start, email_end):
         try:
             if len(list(parsed_email.iter_parts())) > 0:
                 for part in parsed_email.iter_parts():
-                    if (
-                        is_attachment := part.get("Content-Disposition")
-                        and "attachment" in is_attachment
-                    ):
+                    disposition = part.get("Content-Disposition")
+                    if disposition and "attachment" in disposition:
                         continue
                     current_content = to_string(part.get_content())
                     content += current_content
@@ -338,11 +365,13 @@ def get_email_content(email_start, email_end):
         return content
 
 
-def surround_with_wildcards(input):
+def surround_with_wildcards(input: str) -> str:
     return f"%{input}%"
 
 
-def get_similar_vectors(db, vec):
+def get_similar_vectors(
+    db: duckdb.DuckDBPyConnection, vec: npt.NDArray[np.float64]
+) -> pd.DataFrame:
     rel = db.execute("""SELECT *, array_distance(vec, ?::FLOAT[768]) as dist
     FROM
     embeddings
@@ -354,7 +383,12 @@ def get_similar_vectors(db, vec):
     return rel.df()
 
 
-def get_email_list(db, criteria=None, additional_criteria=None, sent=False):
+def get_email_list(
+    db: duckdb.DuckDBPyConnection,
+    criteria: Optional[Dict[str, int]] = None,
+    additional_criteria: Optional[Dict[str, str]] = None,
+    sent: bool = False,
+) -> pd.DataFrame:
     if not criteria:
         rel = db.sql("select * from emails order by date desc limit 30")
         # return db.fetchall()
@@ -403,13 +437,13 @@ def get_email_list(db, criteria=None, additional_criteria=None, sent=False):
         return db.df()
 
 
-def load_email_content_search(email_embeddings_name="emails.chromadb"):
+def load_email_content_search(email_embeddings_name: str = "emails.chromadb") -> chromadb.Collection:
     chroma_client = chromadb.PersistentClient(path="emails.chromadb")
     emails_collection = chroma_client.get_or_create_collection(name="emails")
     return emails_collection
 
 
-def process(drop_previous_table=False):
+def process(drop_previous_table: bool = False) -> None:
     # imports
     from hashlib import sha256
 
@@ -543,27 +577,29 @@ def process(drop_previous_table=False):
 
     print(res.df())
 
-    def query_collection(collection, query):
+    def query_collection(collection: chromadb.Collection, query: str) -> Dict[str, List[List[str]]]:
         # Query the results
         query = "vyrizena objednavka"
         results = collection.query(query_texts=[query], n_results=2)
         model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512)
-        scores = model.predict([(query, doc) for doc in results["documents"][0]])
-        print(results["documents"][0][np.argmax(scores)])
-        return results
+        documents = results.get("documents")
+        if documents and len(documents) > 0 and documents[0]:
+            scores = model.predict([(query, doc) for doc in documents[0]])
+            print(documents[0][np.argmax(scores)])
+        return results  # type: ignore[return-value]
 
 
 query_prefix = "task: search result | query: "
 document_prefix = "title: none | text: "
 
 
-def ollama_embeddings(text, server_url, model):
+def ollama_embeddings(text: str, server_url: str, model: str) -> npt.NDArray[np.float64]:
     response = requests.post(server_url, json={"model": model, "input": text})
     if response.status_code == 200:
         json_data = response.json()
         return np.squeeze(np.array(json_data["embeddings"]))
     else:
-        return np.array()
+        return np.array([])
 
 
 if __name__ == "__main__":
