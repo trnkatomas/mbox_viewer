@@ -1,6 +1,7 @@
 import email
 from email.message import Message
 from email.policy import default
+from functools import lru_cache
 import os
 from typing import Dict, List, Optional, Tuple, Union, Generator
 from types import TracebackType
@@ -196,7 +197,7 @@ def get_attachment_file(db: duckdb.DuckDBPyConnection, email_id: str, attachment
     if isinstance(email_data_list, list) and email_data_list:
         email_data = email_data_list[0]
         email_raw_string = get_string_email_from_mboxfile(
-            email_data.get("email_start"), email_data.get("email_end")  # type: ignore[arg-type]
+            email_data.get("email_start"), email_data.get("email_end")
         )
         attachments = parse_email(email_raw_string).get("attachments")
         for a in attachments:  # type: ignore[union-attr]
@@ -359,6 +360,7 @@ def parse_email(
     return {"body": body_info, "attachments": attachments_list}
 
 
+@lru_cache(maxsize=512)
 def get_string_email_from_mboxfile(email_start: int, email_end: int) -> bytes:
     with open(mboxfilename, "rb") as infile:
         infile.seek(email_start)

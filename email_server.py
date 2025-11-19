@@ -1,6 +1,7 @@
 import datetime
 import time
 from contextlib import asynccontextmanager
+from functools import lru_cache
 import re
 from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING, Any
 
@@ -34,6 +35,19 @@ if TYPE_CHECKING:
 db_connections: Dict[str, Union["duckdb.DuckDBPyConnection"]] = {}
 
 EMAILS_PER_PAGE = 5
+
+
+# Cached wrapper functions for stats (cached with LRU, maxsize=128)
+@lru_cache(maxsize=128)
+def get_cached_basic_stats() -> List[pd.DataFrame]:
+    """Cached version of get_basic_stats."""
+    return get_basic_stats(db_connections["duckdb"])
+
+
+@lru_cache(maxsize=128)
+def get_cached_email_sizes_in_time() -> pd.DataFrame:
+    """Cached version of get_email_sizes_in_time."""
+    return get_email_sizes_in_time(db_connections["duckdb"])
 
 
 @asynccontextmanager
@@ -189,9 +203,9 @@ async def stats_layout(request: Request) -> HTMLResponse:
     """Route to serve the base HTML template."""
     stats_template = templates.get_template("stats.jinja")
 
-    basic_stats = get_basic_stats(db_connections["duckdb"])
-    all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails", 0)
-    avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size", 0)
+    basic_stats = get_cached_basic_stats()
+    all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails")
+    avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size")
     first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
     last_seen = basic_stats[2].to_dict(orient="records")[0].get("last_seen")
 
@@ -212,7 +226,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
 async def stats_data(query_name: str) -> list:
     """Route to serve the base HTML template."""
     if query_name == "dates_size":
-        basic_stats = get_email_sizes_in_time(db_connections["duckdb"])
+        basic_stats = get_cached_email_sizes_in_time()
         if not basic_stats.empty:
             # Convert date column to ISO format string for JSON serialization if it's datetime
             if pd.api.types.is_datetime64_any_dtype(basic_stats['date']):
