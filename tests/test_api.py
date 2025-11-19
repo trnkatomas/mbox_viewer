@@ -189,12 +189,12 @@ class TestStatsEndpoint:
     """Tests for statistics endpoints."""
 
     def test_stats_basic(self, client):
-        """Test basic stats endpoint - returns empty dict for unsupported query."""
+        """Test basic stats endpoint - returns empty list for unsupported query."""
         response = client.get("/api/stats/data/basic_stats")
         assert response.status_code == 200
         data = response.json()
-        # The endpoint returns {} for unknown query names
-        assert data == {}
+        # The endpoint returns [] for unknown query names
+        assert data == []
 
     def test_stats_email_sizes(self, client):
         """Test email sizes over time endpoint."""
@@ -214,7 +214,7 @@ class TestStatsEndpoint:
         response = client.get("/api/stats/data/unknown_query")
         assert response.status_code == 200
         data = response.json()
-        assert data == {}
+        assert data == []
 
 
 class TestAttachmentEndpoint:
