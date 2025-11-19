@@ -146,10 +146,16 @@ class TestEmailEndpoints:
             'email_end': [100, 200]
         })
 
+        mock_parsed_email = {
+            'body': ('text/html', '<p>Test email body</p>'),
+            'attachments': []
+        }
+
         with patch('email_server.get_one_thread', return_value=mock_thread):
-            with patch('email_server.get_email_content', return_value=('Plain Text', 'Body')):
-                response = client.get("/api/email_thread/thread1")
-                assert response.status_code == 200
+            with patch('email_server.get_string_email_from_mboxfile', return_value=b'From: test@example.com\nSubject: Test\n\nBody'):
+                with patch('email_server.parse_email', return_value=mock_parsed_email):
+                    response = client.get("/api/email_thread/thread1")
+                    assert response.status_code == 200
 
 
 class TestSearchEndpoint:
@@ -183,12 +189,12 @@ class TestStatsEndpoint:
     """Tests for statistics endpoints."""
 
     def test_stats_basic(self, client):
-        """Test basic stats endpoint - returns empty dict for unsupported query."""
+        """Test basic stats endpoint - returns empty list for unsupported query."""
         response = client.get("/api/stats/data/basic_stats")
         assert response.status_code == 200
         data = response.json()
-        # The endpoint returns {} for unknown query names
-        assert data == {}
+        # The endpoint returns [] for unknown query names
+        assert data == []
 
     def test_stats_email_sizes(self, client):
         """Test email sizes over time endpoint."""
@@ -208,7 +214,7 @@ class TestStatsEndpoint:
         response = client.get("/api/stats/data/unknown_query")
         assert response.status_code == 200
         data = response.json()
-        assert data == {}
+        assert data == []
 
 
 class TestAttachmentEndpoint:
