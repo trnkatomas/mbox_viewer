@@ -136,7 +136,7 @@ def get_email_sizes_in_time(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return results
 
 
-def get_domains_by_count(db):
+def get_domains_by_count(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     """Get email count by sender domain, limited to top domains."""
     stats_query = """
     with domain_counts as (
