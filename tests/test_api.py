@@ -146,10 +146,16 @@ class TestEmailEndpoints:
             'email_end': [100, 200]
         })
 
+        mock_parsed_email = {
+            'body': ('text/html', '<p>Test email body</p>'),
+            'attachments': []
+        }
+
         with patch('email_server.get_one_thread', return_value=mock_thread):
-            with patch('email_server.get_email_content', return_value=('Plain Text', 'Body')):
-                response = client.get("/api/email_thread/thread1")
-                assert response.status_code == 200
+            with patch('email_server.get_string_email_from_mboxfile', return_value=b'From: test@example.com\nSubject: Test\n\nBody'):
+                with patch('email_server.parse_email', return_value=mock_parsed_email):
+                    response = client.get("/api/email_thread/thread1")
+                    assert response.status_code == 200
 
 
 class TestSearchEndpoint:
