@@ -2,7 +2,7 @@ import datetime
 import time
 from contextlib import asynccontextmanager
 import re
-from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING
+from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Query, Request, status, Form
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
@@ -116,17 +116,28 @@ def create_thread_detail_fragment(
     thread: List[Dict[str, Union[str, int]]],
 ) -> str:
     """Generates the HTML for the email detail pane."""
+    # Parse content for each email in the thread
+    enriched_thread = []
+    for email in thread:
+        email_start = email.get("email_start")
+        email_end = email.get("email_end")
+        if isinstance(email_start, int) and isinstance(email_end, int):
+            email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
+            parsed_email = parse_email(email_raw_string)
+            # Enrich the email dict with parsed content
+            enriched_email: Dict[str, Any] = dict(email)  # Create a copy with flexible typing
+            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[1]  # Get HTML content
+            enriched_email["attachments"] = parsed_email.get("attachments", [])
+            enriched_thread.append(enriched_email)
+        else:
+            # If we can't parse, just add the email as-is
+            enriched_thread.append(email)
+
     email_thread_detail_template = templates.get_template("email_detail_thread.jinja")
     output = email_thread_detail_template.render(
-        email_id=thread[0]["message_id"],
-        email_subject=thread[0]["subject"],
-        email_sender=thread[0]["from_email"],
-        email_date=thread[0]["date"],
-        email_body=thread[0],
-        has_attachment=thread[0]["has_attachment"],
-        attachments=[],
-        thread=len(thread),
-        thread_id=thread[0].get("thread_id"),
+        thread_emails=enriched_thread,
+        thread_count=len(thread),
+        thread_id=thread[0].get("thread_id") if thread else None,
     )
     return output
 

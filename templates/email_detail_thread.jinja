@@ -1,217 +1,193 @@
 
         <div id="email-detail-pane"
-             class="flex-1 lg:flex-none p-6 bg-white border-l border-gray-200 overflow-y-auto custom-scroll shadow-xl">
+             class="h-full p-6 bg-white border-l border-gray-200 overflow-y-auto custom-scroll shadow-xl">
 
-        <!--/div-->
             <!-- THREAD CONTAINER: Messages are ordered oldest to newest (top to bottom) -->
             <div id="thread-end" class="space-y-6">
 
-                <!-- MESSAGE 1 (Oldest - Now uniform) -->
+                {% for email in thread_emails %}
+                <!-- Thread Message {{ loop.index }} -->
                 <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
-                    <div id="email-header" class="flex justify-between items-start mb-4 border-b border-gray-100 pb-2">
+                    <div {% if loop.first %}id="email-header"{% endif %} class="flex justify-between items-start mb-{% if loop.first %}4{% else %}2{% endif %} {% if loop.first %}border-b border-gray-100 pb-2{% endif %}">
                         <div class="space-y-1">
-                            <h2 class="text-2xl font-extrabold text-gray-900">{{email_subject}}</h2>
-                            <p class="text-sm font-medium text-gray-600">From: {{email_sender}}</p>
+                            {% if loop.first %}
+                            <h2 class="text-2xl font-extrabold text-gray-900">{{email.subject}}</h2>
+                            {% endif %}
+                            <p class="text-sm font-{% if loop.first %}medium{% else %}semibold{% endif %} text-gray-{% if loop.first %}600{% else %}900{% endif %}">{% if loop.first %}From: {% endif %}{{email.from_email}}</p>
                         </div>
                         <div class="flex flex-col items-end space-y-2 pt-1">
-                            <span class="text-xs text-gray-400">{{email_date}}</span>
+                            <span class="text-xs text-gray-400">{{email.date}}</span>
+                            {% if loop.first %}
                             <span class="flex items-center space-x-1 text-sm font-semibold text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">
                                 <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
                                 </svg>
-                                <span>{{thread}} messages</span>
+                                <span>{{thread_count}} messages</span>
                             </span>
+                            {% endif %}
                         </div>
                     </div>
-                    {% if has_attachment %}
-                        {% for att in attachments %}
-                            <div class="flex flex-wrap gap-2 mt-4 p-2">
-                                <a href="/api/attachment/{{email_id}}/{{att['filename']}}" target="_blank">
-                                <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
-                                    <!-- Paperclip Icon -->
-                                    <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                                    {{att['filename']}}
-                                    <span class="ml-2 text-xs text-indigo-400 font-normal">{{ '%.02f' % (att['size_bytes']/(1024*1024))}}MB</span>
-                                </span>
-                                </a>
-                            </div>
+                    {% if email.attachments and email.attachments|length > 0 %}
+                        <div class="flex flex-wrap gap-2 mt-4">
+                        {% for att in email.attachments %}
+                            <a href="/api/attachment/{{email.message_id}}/{{att['filename']}}" target="_blank">
+                            <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
+                                <!-- Paperclip Icon -->
+                                <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                                {{att['filename']}}
+                                <span class="ml-2 text-xs text-indigo-400 font-normal">{{ '%.02f' % (att['size_bytes']/(1024*1024))}}MB</span>
+                            </span>
+                            </a>
                         {% endfor %}
+                        </div>
                     {% endif %}
                     <textarea
-                        id="htmlInput"
+                        id="htmlInput-{{loop.index}}"
                         style="display:none"
-                        class="form-control w-full h-48 font-mono text-sm p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 mb-4"
+                        class="email-content-input"
                         placeholder="Enter HTML content here..."
-                    >{{email_body|safe}}</textarea>
+                    >{{email.parsed_body|safe}}</textarea>
                     <div class="border-2 border-slate-200 rounded-lg overflow-hidden bg-slate-50">
-                        <span id="iframeHeight" class="text-sm text-slate-500"></span>
+                        <span id="iframeHeight-{{loop.index}}" class="text-sm text-slate-500"></span>
                         <iframe
-                            id="contentFrame"
+                            id="contentFrame-{{loop.index}}"
+                            class="email-iframe w-full border-0 bg-white"
                             sandbox="allow-same-origin allow-scripts"
-                            class="w-full border-0 bg-white"
                             style="min-height: 200px;"
                         ></iframe>
                     </div>
                 </div>
-
-                <div class="ml-0 border-l-2 border-indigo-200 pl-4 py-4 bg-white shadow-sm rounded-lg transition duration-300 hover:shadow-md">
-                    <div class="flex justify-between items-start mb-2">
-                        <div class="text-sm font-semibold text-gray-900">Ben Smith</div>
-                        <div class="text-xs text-gray-400">Oct 28, 11:45 AM</div>
-                    </div>
-                    <p class="text-gray-800 leading-relaxed">
-                        I've made some mockups for the attachment badge and the thread visual. Let me know what you think.
-                    </p>
-                    <div class="flex flex-wrap gap-2 mt-4">
-                        <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
-                            <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                            Design_Draft.pdf
-                            <span class="ml-2 text-xs text-indigo-400 font-normal">5.2MB</span>
-                        </span>
-                        <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
-                            <svg class="w-4 h-4 mr-2 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-10 4h.01M5 18h.01M16 18h.01"></path></svg>
-                            Logo_Final.jpg
-                        </span>
-                    </div>
-                </div>
+                {% endfor %}
 
          </div>
          <!-- End of Thread Container -->
-         <!--script src="/static/iframe_wrapper.js"></script-->
          <script>
-            console.log('calling the function to load the content');
-            var htmlInput = document.getElementById('htmlInput');
-            var iframe = document.getElementById('contentFrame');
-            var heightDisplay = document.getElementById('iframeHeight');
-            //var list_pane = document.getElementById('list-pane')
+            console.log('Loading thread email content');
 
-        // Load content into iframe
-        function loadContent(html_content) {
-            const htmlContent = htmlInput.value || '<p style="padding: 20px;">Enter some HTML content and click "Load Content"</p>';
+            // Load content into a specific iframe
+            function loadContentIntoIframe(iframe, htmlInput, heightDisplay) {
+                const htmlContent = htmlInput.value || '<p style="padding: 20px;">No content available</p>';
+                const iframeId = iframe.id;
 
-            // Wrap content with resize script
-            const wrappedContent = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <style>
-                        body { margin: 0; padding: 16px; font-family: system-ui, -apple-system, sans-serif; }
-                    </style>
-                </head>
-                <body>
-                    ${htmlContent}
-                    <script>
-                        // Send height updates to parent
-                        function sendHeight() {
-                            try {
-                                const height = Math.max(
-                                    document.body.scrollHeight,
-                                    document.documentElement.scrollHeight,
-                                    document.body.offsetHeight,
-                                    document.documentElement.offsetHeight
-                                );
-                                console.log(document.body.scrollHeight);
-                                console.log(document.documentElement.scrollHeight);
-                                console.log(document.body.offsetHeight);
-                                console.log(document.documentElement.offsetHeight);
-                                console.log('just some print to enter the debugger');
+                // Wrap content with resize script
+                const wrappedContent = `
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta charset="UTF-8">
+                        <style>
+                            body { margin: 0; padding: 16px; font-family: system-ui, -apple-system, sans-serif; }
+                        </style>
+                    </head>
+                    <body>
+                        ${htmlContent}
+                        <script>
+                            // Send height updates to parent
+                            function sendHeight() {
+                                try {
+                                    const height = Math.max(
+                                        document.body.scrollHeight,
+                                        document.documentElement.scrollHeight,
+                                        document.body.offsetHeight,
+                                        document.documentElement.offsetHeight
+                                    );
 
-                                window.parent.postMessage({
-                                    type: 'resize',
-                                    height: height
-                                }, '*');
-
-                                console.log('Sent height:', height);
-                            } catch(e) {
-                                console.error('Failed to send height:', e);
-                            }
-                        }
-
-                        // Wait for DOM to be ready
-                        if (document.readyState === 'loading') {
-                            document.addEventListener('DOMContentLoaded', sendHeight);
-                        } else {
-                            sendHeight();
-                        }
-
-                        // Send after a short delay to ensure rendering
-                        setTimeout(sendHeight, 50);
-                        setTimeout(sendHeight, 200);
-                        setTimeout(sendHeight, 500);
-
-                        // Watch for changes
-                        const observer = new MutationObserver(function() {
-                            setTimeout(sendHeight, 10);
-                        });
-
-                        observer.observe(document.body, {
-                            attributes: true,
-                            childList: true,
-                            subtree: true
-                        });
-
-                        // Watch for resize
-                        window.addEventListener('resize', sendHeight);
-
-                        // Watch for images loading
-                        setTimeout(function() {
-                            document.querySelectorAll('img').forEach(img => {
-                                if (!img.complete) {
-                                    img.addEventListener('load', sendHeight);
+                                    window.parent.postMessage({
+                                        type: 'resize',
+                                        height: height,
+                                        iframeId: '${iframeId}'
+                                    }, '*');
+                                } catch(e) {
+                                    console.error('Failed to send height:', e);
                                 }
+                            }
+
+                            // Wait for DOM to be ready
+                            if (document.readyState === 'loading') {
+                                document.addEventListener('DOMContentLoaded', sendHeight);
+                            } else {
+                                sendHeight();
+                            }
+
+                            // Send after delays to ensure rendering
+                            setTimeout(sendHeight, 50);
+                            setTimeout(sendHeight, 200);
+                            setTimeout(sendHeight, 500);
+
+                            // Watch for changes
+                            const observer = new MutationObserver(function() {
+                                setTimeout(sendHeight, 10);
                             });
-                        }, 0);
-                    <\/script>
-                </body>
-                </html>
-            `;
 
-            iframe.srcdoc = wrappedContent;
-        }
+                            observer.observe(document.body, {
+                                attributes: true,
+                                childList: true,
+                                subtree: true
+                            });
 
-         // Listen for resize messages from iframe
-        window.addEventListener('message', function(event) {
-            // Add safety check for event.data
-            if (event.data && event.data.type === 'resize') {
-                    var height = event.data.height;
-                     var list_pane = document.getElementById('list-pane');
-                     var email_header = document.getElementById('email-header');
-                     console.log(`observer resize list_pane: ${list_pane.offsetHeight}`);
-                     console.log(`observer resize email_header: ${email_header.offsetHeight}`);
-                     if (height > list_pane.offsetHeight) {
-                            height = list_pane.offsetHeight - (email_header.offsetHeight*3);//- 100;
-                     }
-                    iframe.style.height = height + 'px';
-                    heightDisplay.textContent = `Height: ${height}px`;
+                            // Watch for resize
+                            window.addEventListener('resize', sendHeight);
+
+                            // Watch for images loading
+                            setTimeout(function() {
+                                document.querySelectorAll('img').forEach(img => {
+                                    if (!img.complete) {
+                                        img.addEventListener('load', sendHeight);
+                                    }
+                                });
+                            }, 0);
+                        <\/script>
+                    </body>
+                    </html>
+                `;
+
+                iframe.srcdoc = wrappedContent;
             }
-        }, false);
 
-        // Also handle iframe load event
-        iframe.addEventListener('load', function() {
-            // Give iframe time to calculate height
-            setTimeout(function() {
-                // Trigger a manual check if postMessage fails
-                try {
-                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
-                    if (iframeDoc) {
-                        var height = iframeDoc.documentElement.scrollHeight;
-                        console.log(`observer load height: ${height}`);
-                        var list_pane = document.getElementById('list-pane');
-                        var email_header = document.getElementById('email-header');
-                        console.log(`observer list_pane: ${list_pane.offsetHeight}`);
-                        console.log(`observer email_header: ${email_header.offsetHeight}`);
-                        if (height > list_pane.offsetHeight) {
-                            height = list_pane.offsetHeight - (email_header.offsetHeight*3);//- 100;
-                        }
+            // Listen for resize messages from all iframes
+            window.addEventListener('message', function(event) {
+                if (event.data && event.data.type === 'resize' && event.data.iframeId) {
+                    const iframe = document.getElementById(event.data.iframeId);
+                    if (iframe) {
+                        const height = event.data.height;
                         iframe.style.height = height + 'px';
-                        heightDisplay.textContent = `Height: ${height}px (direct access)`;
+
+                        const heightDisplay = document.getElementById(event.data.iframeId.replace('contentFrame', 'iframeHeight'));
+                        if (heightDisplay) {
+                            heightDisplay.textContent = `Height: ${height}px`;
+                        }
                     }
-                } catch(e) {
-                    console.log('Direct access blocked (cross-origin), relying on postMessage');
                 }
-            }, 100);
-        });
-            loadContent();
+            }, false);
+
+            // Initialize all email iframes
+            document.querySelectorAll('.email-iframe').forEach(function(iframe, index) {
+                const inputId = 'htmlInput-' + (index + 1);
+                const heightId = 'iframeHeight-' + (index + 1);
+                const htmlInput = document.getElementById(inputId);
+                const heightDisplay = document.getElementById(heightId);
+
+                if (htmlInput && heightDisplay) {
+                    loadContentIntoIframe(iframe, htmlInput, heightDisplay);
+
+                    // Also handle iframe load event
+                    iframe.addEventListener('load', function() {
+                        setTimeout(function() {
+                            try {
+                                const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                                if (iframeDoc) {
+                                    const height = iframeDoc.documentElement.scrollHeight;
+                                    iframe.style.height = height + 'px';
+                                    if (heightDisplay) {
+                                        heightDisplay.textContent = `Height: ${height}px (direct)`;
+                                    }
+                                }
+                            } catch(e) {
+                                console.log('Direct access blocked, relying on postMessage');
+                            }
+                        }, 100);
+                    });
+                }
+            });
          </script>
 </div>
