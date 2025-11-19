@@ -1,6 +1,7 @@
 import datetime
 import time
 from contextlib import asynccontextmanager
+from functools import lru_cache
 import re
 from typing import Optional, Annotated
 
@@ -30,6 +31,19 @@ from email_utils import (
 db_connections = {}
 
 EMAILS_PER_PAGE = 5
+
+
+# Cached wrapper functions for stats (cached with LRU, maxsize=128)
+@lru_cache(maxsize=128)
+def get_cached_basic_stats():
+    """Cached version of get_basic_stats."""
+    return get_basic_stats(db_connections["duckdb"])
+
+
+@lru_cache(maxsize=128)
+def get_cached_email_sizes_in_time():
+    """Cached version of get_email_sizes_in_time."""
+    return get_email_sizes_in_time(db_connections["duckdb"])
 
 
 @asynccontextmanager
@@ -159,7 +173,7 @@ async def stats_layout(request: Request):
     """Route to serve the base HTML template."""
     stats_template = templates.get_template("stats.jinja")
 
-    basic_stats = get_basic_stats(db_connections["duckdb"])
+    basic_stats = get_cached_basic_stats()
     all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails")
     avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size")
     first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
@@ -174,14 +188,13 @@ async def stats_layout(request: Request):
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
-async def stats_layout(query_name: str):
-    """Route to serve the base HTML template."""
+async def stats_data(query_name: str):
+    """Route to serve stats data with caching."""
     if query_name == "dates_size":
-        basic_stats = get_email_sizes_in_time(db_connections["duckdb"])
+        basic_stats = get_cached_email_sizes_in_time()
         if not basic_stats.empty:
             return basic_stats.to_dict(orient="records")
-    else:
-        return {}
+    return {}
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)

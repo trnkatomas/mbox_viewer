@@ -1,5 +1,6 @@
 import email
 from email.policy import default
+from functools import lru_cache
 import os
 
 import numpy as np
@@ -318,7 +319,9 @@ def parse_email(raw_email: bytes):
     return {"body": body_info, "attachments": attachments_list}
 
 
+@lru_cache(maxsize=512)
 def get_string_email_from_mboxfile(email_start, email_end):
+    """Read email from mbox file with LRU caching for performance."""
     with open(mboxfilename, "rb") as infile:
         infile.seek(email_start)
         data = infile.read(email_end - email_start)
