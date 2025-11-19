@@ -209,7 +209,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
-async def stats_data(query_name: str) -> Union[list, dict]:
+async def stats_data(query_name: str) -> list:
     """Route to serve the base HTML template."""
     if query_name == "dates_size":
         basic_stats = get_email_sizes_in_time(db_connections["duckdb"])
@@ -222,7 +222,7 @@ async def stats_data(query_name: str) -> Union[list, dict]:
         domain_stats = get_domains_by_count(db_connections["duckdb"])
         if not domain_stats.empty:
             return domain_stats.to_dict(orient="records")
-    return {}
+    return []
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
