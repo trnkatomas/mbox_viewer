@@ -136,6 +136,25 @@ def get_email_sizes_in_time(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return results
 
 
+def get_domains_by_count(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Get email count by sender domain, limited to top domains."""
+    stats_query = """
+    with domain_counts as (
+        select
+            regexp_extract(from_email, '@([^>]+)') as domain,
+            count(*) as count
+        from emails
+        where from_email is not null
+        group by domain
+        order by count desc
+        limit 10
+    )
+    select domain, count from domain_counts
+    """
+    results = db.execute(stats_query).df()
+    return results
+
+
 def get_thread_for_email(db: duckdb.DuckDBPyConnection, email_id: str) -> pd.DataFrame:
     email_from_db = get_one_email(db, email_id)
     if not email_from_db.empty:

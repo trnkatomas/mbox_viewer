@@ -5,28 +5,16 @@
          * Renders the D3.js charts in the statistics dashboard.
          */
         async function loadStats() {
-            // Dummy Data
+            // Fetch and parse volume data
+            const volumeDataRaw = await d3.json("/api/stats/data/dates_size");
+            // Parse ISO date strings into Date objects
+            const volumeData = volumeDataRaw.map(d => ({
+                ...d,
+                date: new Date(d.date)
+            }));
 
-            const volumeData = await d3.json("/api/stats/data/dates_size");
-            //console log(volumeData_new);
-
-            /*const volumeData = [
-                { date: new Date('2025-10-24'), count: 55 },
-                { date: new Date('2025-10-25'), count: 68 },
-                { date: new Date('2025-10-26'), count: 80 },
-                { date: new Date('2025-10-27'), count: 72 },
-                { date: new Date('2025-10-28'), count: 95 },
-                { date: new Date('2025-10-29'), count: 110 },
-                { date: new Date('2025-10-30'), count: 105 }
-            ];*/
-
-            const senderData = [
-                { domain: "corp.com", count: 350 },
-                { domain: "client.io", count: 120 },
-                { domain: "spam.net", count: 50 },
-                { domain: "hr.com", count: 80 },
-                { domain: "other", count: 400 },
-            ];
+            // Fetch domain statistics
+            const senderData = await d3.json("/api/stats/data/domains_count");
 
 
 
@@ -54,17 +42,24 @@
                 const x = d3.scaleTime()
                     .domain(d3.extent(data, d => d.date))
                     .range([0, width]);
+
+                // Dynamically choose tick count based on chart width (doubled spacing)
+                const tickCount = Math.max(3, Math.min(8, Math.floor(width / 240)));
+
                 svg.append("g")
                     .attr("transform", `translate(0,${height})`)
-                    .call(d3.axisBottom(x).ticks(d3.timeDay.every(1)).tickFormat(d3.timeFormat("%b %d")))
+                    .call(d3.axisBottom(x).ticks(tickCount).tickFormat(d3.timeFormat("%b %Y")))
                     .selectAll("text")
+                    .attr("transform", "rotate(-45)")
+                    .style("text-anchor", "end")
                     .style("fill", "#6b7280"); // Darker axis text
 
+                // Convert bytes to MB for y-axis
                 const y = d3.scaleLinear()
-                    .domain([0, d3.max(data, d => d.count) * 1.1])
+                    .domain([0, d3.max(data, d => d.count / (1024 * 1024)) * 1.1])
                     .range([height, 0]);
                 svg.append("g")
-                    .call(d3.axisLeft(y))
+                    .call(d3.axisLeft(y).tickFormat(d => d.toFixed(0) + " MB"))
                     .selectAll("text")
                     .style("fill", "#6b7280"); // Darker axis text
 
@@ -75,7 +70,7 @@
                     .attr("stroke-width", 3)
                     .attr("d", d3.line()
                         .x(d => x(d.date))
-                        .y(d => y(d.count))
+                        .y(d => y(d.count / (1024 * 1024)))
                     );
 
                 // Tooltip setup (updated for light theme)
@@ -87,22 +82,23 @@
                     .enter().append("circle")
                     .attr("r", 5)
                     .attr("cx", d => x(d.date))
-                    .attr("cy", d => y(d.count))
+                    .attr("cy", d => y(d.count / (1024 * 1024)))
                     .attr("fill", "#059669") // Dark green dots
                     .on("mouseover", function(event, d) {
                         d3.select(this).attr("r", 8).attr("fill", "#f59e0b"); // Amber hover
 
+                        const sizeMB = (d.count / (1024 * 1024)).toFixed(2);
                         tooltip.style("opacity", 1)
                             .style("left", (event.pageX + 10) + "px")
                             .style("top", (event.pageY - 15) + "px")
-                            .html(`Date: ${d3.timeFormat("%b %d")(d.date)}<br>Count: ${d.count}`);
+                            .html(`Date: ${d3.timeFormat("%b %Y")(d.date)}<br>Size: ${sizeMB} MB`);
 
                         d3.select(this.parentNode).append("line")
                             .attr("class", "hover-line")
                             .attr("x1", x(d.date))
                             .attr("x2", x(d.date))
                             .attr("y1", height)
-                            .attr("y2", y(d.count))
+                            .attr("y2", y(d.count / (1024 * 1024)))
                             .attr("stroke", "#f59e0b")
                             .attr("stroke-width", 1)
                             .attr("stroke-dasharray", "4,4");
