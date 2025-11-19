@@ -30,8 +30,9 @@
                         </div>
                     </div>
                     {% if has_attachment %}
+                        <div class="flex flex-wrap gap-2 mt-4 p-2">
                         {% for att in attachments %}
-                            <div class="flex flex-wrap gap-2 mt-4 p-2">
+
                                 <a href="/api/attachment/{{email_id}}/{{att['filename']}}" target="_blank">
                                 <span class="inline-flex items-center px-3 py-1 text-sm font-medium bg-white text-gray-700 rounded-full border border-indigo-300 shadow-sm transition duration-150 hover:bg-indigo-50 cursor-pointer">
                                     <!-- Paperclip Icon -->
@@ -40,8 +41,8 @@
                                     <span class="ml-2 text-xs text-indigo-400 font-normal">{{ '%.02f' % (att['size_bytes']/(1024*1024))}}MB</span>
                                 </span>
                                 </a>
-                            </div>
                         {% endfor %}
+                        </div>
                     {% endif %}
                     <textarea
                         id="htmlInput"
