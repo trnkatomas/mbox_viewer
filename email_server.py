@@ -2,7 +2,7 @@ import datetime
 import time
 from contextlib import asynccontextmanager
 import re
-from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING
+from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Query, Request, status, Form
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
@@ -125,7 +125,7 @@ def create_thread_detail_fragment(
             email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
             parsed_email = parse_email(email_raw_string)
             # Enrich the email dict with parsed content
-            enriched_email = dict(email)  # Create a copy
+            enriched_email: Dict[str, Any] = dict(email)  # Create a copy with flexible typing
             enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[1]  # Get HTML content
             enriched_email["attachments"] = parsed_email.get("attachments", [])
             enriched_thread.append(enriched_email)
