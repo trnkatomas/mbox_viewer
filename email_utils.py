@@ -197,7 +197,7 @@ def get_attachment_file(db: duckdb.DuckDBPyConnection, email_id: str, attachment
     if isinstance(email_data_list, list) and email_data_list:
         email_data = email_data_list[0]
         email_raw_string = get_string_email_from_mboxfile(
-            email_data.get("email_start"), email_data.get("email_end")  # type: ignore[arg-type]
+            email_data.get("email_start"), email_data.get("email_end")
         )
         attachments = parse_email(email_raw_string).get("attachments")
         for a in attachments:  # type: ignore[union-attr]

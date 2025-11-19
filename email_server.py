@@ -39,13 +39,13 @@ EMAILS_PER_PAGE = 5
 
 # Cached wrapper functions for stats (cached with LRU, maxsize=128)
 @lru_cache(maxsize=128)
-def get_cached_basic_stats():
+def get_cached_basic_stats() -> List[pd.DataFrame]:
     """Cached version of get_basic_stats."""
     return get_basic_stats(db_connections["duckdb"])
 
 
 @lru_cache(maxsize=128)
-def get_cached_email_sizes_in_time():
+def get_cached_email_sizes_in_time() -> pd.DataFrame:
     """Cached version of get_email_sizes_in_time."""
     return get_email_sizes_in_time(db_connections["duckdb"])
 
