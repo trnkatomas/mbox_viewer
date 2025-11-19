@@ -2,9 +2,7 @@ import datetime
 import time
 from contextlib import asynccontextmanager
 import re
-from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING, cast
-
-import pandas as pd
+from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING
 
 from fastapi import FastAPI, Query, Request, status, Form
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
@@ -179,7 +177,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
     """Route to serve the base HTML template."""
     stats_template = templates.get_template("stats.jinja")
 
-    basic_stats = get_basic_stats(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]))
+    basic_stats = get_basic_stats(db_connections["duckdb"])
     all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails", 0)
     avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size", 0)
     first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
@@ -202,7 +200,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
 async def stats_data(query_name: str) -> Union[List[Dict[str, Union[str, int, float]]], Dict[str, str]]:
     """Route to serve the base HTML template."""
     if query_name == "dates_size":
-        basic_stats = get_email_sizes_in_time(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]))
+        basic_stats = get_email_sizes_in_time(db_connections["duckdb"])
         if not basic_stats.empty:
             return basic_stats.to_dict(orient="records")  # type: ignore[return-value]
     return {}
@@ -252,12 +250,12 @@ async def email_list(
             "rag"
         )  # Remove from criteria, handle separately
         rag_message_ids = rag_search_duckdb(
-            cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]),
+            db_connections["duckdb"],
             rag_query,
             n_results=100,  # Get more RAG results, then filter/paginate
         )
 
-    db_conn = cast("duckdb.DuckDBPyConnection", db_connections["duckdb"])
+    db_conn = db_connections["duckdb"]
     page_emails_df = get_email_list(
         db_conn,
         criteria={"limit": EMAILS_PER_PAGE, "offset": start_index} if rag_message_ids is None else {"limit": EMAILS_PER_PAGE, "offset": 0},
@@ -312,7 +310,7 @@ async def email_list(
 async def email_detail(email_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
 
-    email_meta_list = get_one_email(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), email_id).to_dict(
+    email_meta_list = get_one_email(db_connections["duckdb"], email_id).to_dict(
         orient="records"
     )
     if isinstance(email_meta_list, list) and email_meta_list:
@@ -337,7 +335,7 @@ async def email_detail(email_id: str) -> HTMLResponse:
         parsed_email = parse_email(email_raw_string)
         attachments = parsed_email.get("attachments")
         email_content = parsed_email.get("body")
-        is_in_thread = get_thread_for_email(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), email_id).to_dict(
+        is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
             orient="records"
         )
         return HTMLResponse(
@@ -356,7 +354,7 @@ async def email_detail(email_id: str) -> HTMLResponse:
 async def email_thread_detail(thread_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
 
-    thread_meta = get_one_thread(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), thread_id).to_dict(
+    thread_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(
         orient="records"
     )
 
@@ -381,7 +379,7 @@ async def email_thread_detail(thread_id: str) -> HTMLResponse:
 async def get_attachment(email_id: str, attachment_id: str) -> Response:
     """HTMX route to load the detail pane content."""
 
-    attachment = get_attachment_file(cast("duckdb.DuckDBPyConnection", db_connections["duckdb"]), email_id, attachment_id)
+    attachment = get_attachment_file(db_connections["duckdb"], email_id, attachment_id)
 
     if not attachment or "content" not in attachment:
         return Response(
