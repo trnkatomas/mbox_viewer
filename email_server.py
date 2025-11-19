@@ -25,6 +25,7 @@ from email_utils import (
     get_thread_for_email,
     get_basic_stats,
     get_email_sizes_in_time,
+    get_domains_by_count,
 )
 
 db_connections = {}
@@ -175,13 +176,18 @@ async def stats_layout(request: Request):
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
 async def stats_layout(query_name: str):
-    """Route to serve the base HTML template."""
+    """Route to serve stats data."""
     if query_name == "dates_size":
         basic_stats = get_email_sizes_in_time(db_connections["duckdb"])
         if not basic_stats.empty:
+            # Convert date column to ISO format string for JSON serialization
+            basic_stats['date'] = basic_stats['date'].dt.strftime('%Y-%m-%d')
             return basic_stats.to_dict(orient="records")
-    else:
-        return {}
+    elif query_name == "domains_count":
+        domain_stats = get_domains_by_count(db_connections["duckdb"])
+        if not domain_stats.empty:
+            return domain_stats.to_dict(orient="records")
+    return {}
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
