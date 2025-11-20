@@ -730,7 +730,7 @@ def process(drop_previous_table: bool = False) -> None:
                     ids=[message["Message-ID"]], documents=[whole_text]
                 )
                 # the content should be chunked into ~ 500 tokens
-                d_encoded = ollama_embeddings(
+                d_encoded = get_ollama_embedding(
                     document_prefix + whole_text,
                     "http://localhost:11434/api/embed",
                     "embeddinggemma",
