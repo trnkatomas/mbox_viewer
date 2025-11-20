@@ -120,14 +120,17 @@ class TestEmailEndpoints:
                 "message_id": ["<test1@example.com>"],
                 "subject": ["Test Email"],
                 "from_email": ["sender@example.com"],
+                "to_email": ["recipient@example.com"],
                 "date": ["2024-01-01 12:00:00"],
-                "has_attachment": [False],
+                "has_attachment": [0],
                 "email_start": [0],
                 "email_end": [100],
+                "thread_id": ["thread1"],
+                "excerpt": ["Test excerpt"],
+                "labels": [[]],
             }
         )
 
-        mock_raw_email = b"From: sender@example.com\nSubject: Test\n\nBody"
         mock_parsed_email = {
             "body": ("Plain Text", "This is the email body"),
             "attachments": [],
@@ -135,15 +138,13 @@ class TestEmailEndpoints:
 
         with patch("email_server.get_one_email", return_value=mock_email):
             with patch(
-                "email_server.get_string_email_from_mboxfile",
-                return_value=mock_raw_email,
+                "email_server.load_and_parse_email", return_value=mock_parsed_email
             ):
-                with patch("email_server.parse_email", return_value=mock_parsed_email):
-                    with patch(
-                        "email_server.get_thread_for_email", return_value=pd.DataFrame()
-                    ):
-                        response = client.get("/api/email/<test1@example.com>")
-                        assert response.status_code == 200
+                with patch(
+                    "email_server.get_thread_for_email", return_value=pd.DataFrame()
+                ):
+                    response = client.get("/api/email/<test1@example.com>")
+                    assert response.status_code == 200
 
     def test_email_detail_not_found(self, client):
         """Test email detail with non-existent email."""
@@ -159,11 +160,14 @@ class TestEmailEndpoints:
                 "message_id": ["<test1@example.com>", "<test2@example.com>"],
                 "subject": ["Re: Test", "Re: Test"],
                 "from_email": ["sender1@example.com", "sender2@example.com"],
+                "to_email": ["recipient@example.com", "recipient@example.com"],
                 "date": ["2024-01-01 12:00:00", "2024-01-01 13:00:00"],
                 "thread_id": ["thread1", "thread1"],
-                "has_attachment": [False, False],
+                "has_attachment": [0, 0],
                 "email_start": [0, 100],
                 "email_end": [100, 200],
+                "excerpt": ["Test1", "Test2"],
+                "labels": [[], []],
             }
         )
 
@@ -174,12 +178,10 @@ class TestEmailEndpoints:
 
         with patch("email_server.get_one_thread", return_value=mock_thread):
             with patch(
-                "email_server.get_string_email_from_mboxfile",
-                return_value=b"From: test@example.com\nSubject: Test\n\nBody",
+                "email_server.load_and_parse_email", return_value=mock_parsed_email
             ):
-                with patch("email_server.parse_email", return_value=mock_parsed_email):
-                    response = client.get("/api/email_thread/thread1")
-                    assert response.status_code == 200
+                response = client.get("/api/email_thread/thread1")
+                assert response.status_code == 200
 
 
 class TestSearchEndpoint:

@@ -4,6 +4,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from collections.abc import Mapping
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from email_utils import (
+    Email,
     get_attachment_file,
     get_basic_stats,
     get_domains_by_count,
@@ -32,11 +34,10 @@ from email_utils import (
     get_email_sizes_in_time,
     get_one_email,
     get_one_thread,
-    get_string_email_from_mboxfile,
     get_thread_for_email,
+    load_and_parse_email,
     load_email_content_search,
     load_email_db,
-    parse_email,
 )
 
 if TYPE_CHECKING:
@@ -112,7 +113,7 @@ def create_list_item_fragment(
 
 
 def create_detail_fragment(
-    email_meta: Dict[str, Union[str, int]],
+    email_meta: Mapping[Any, Any],
     email_content: Optional[str],
     attachments: List[Dict[str, Union[str, bytes, int]]],
     is_in_thread: List[Dict[str, Union[str, int]]],
@@ -143,24 +144,18 @@ def create_thread_detail_fragment(
     """Generates the HTML for the email detail pane."""
     # Parse content for each email in the thread
     enriched_thread = []
-    for email in thread:
-        email_start = email.get("email_start")
-        email_end = email.get("email_end")
-        if isinstance(email_start, int) and isinstance(email_end, int):
-            email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
-            parsed_email = parse_email(email_raw_string)
+    for email_dict in thread:
+        try:
+            email = Email.from_dict(email_dict)
+            parsed_email = load_and_parse_email(email)
             # Enrich the email dict with parsed content
-            enriched_email: Dict[str, Any] = dict(
-                email
-            )  # Create a copy with flexible typing
-            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[
-                1
-            ]  # Get HTML content
+            enriched_email: Dict[str, Any] = dict(email_dict)
+            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[1]
             enriched_email["attachments"] = parsed_email.get("attachments", [])
             enriched_thread.append(enriched_email)
-        else:
-            # If we can't parse, just add the email as-is
-            enriched_thread.append(email)
+        except (KeyError, ValueError) as e:
+            logger.warning(f"Failed to parse email in thread: {e}")
+            enriched_thread.append(email_dict)
 
     email_thread_detail_template = templates.get_template("email_detail_thread.jinja")
     output = email_thread_detail_template.render(
@@ -366,34 +361,24 @@ async def email_list(
 async def email_detail(email_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
 
-    email_meta_list = get_one_email(db_connections["duckdb"], email_id).to_dict(
-        orient="records"
-    )
-    if isinstance(email_meta_list, list) and email_meta_list:
-        email_meta: Dict[str, Union[str, int]] = email_meta_list[0]  # type: ignore[assignment]
-    else:
+    email_df = get_one_email(db_connections["duckdb"], email_id)
+    if email_df.empty:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
-    if email_meta:
-        email_start = email_meta.get("email_start")
-        email_end = email_meta.get("email_end")
-        if isinstance(email_start, int) and isinstance(email_end, int):
-            email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
-        else:
-            return HTMLResponse(
-                content="<div class='p-8 text-center text-red-400'>Error: Invalid email boundaries.</div>",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+    try:
+        email_meta = email_df.to_dict(orient="records")[0]
+        email = Email.from_dict(email_meta)
+        parsed_email = load_and_parse_email(email)
 
-        parsed_email = parse_email(email_raw_string)
         attachments = parsed_email.get("attachments")
         email_content = parsed_email.get("body")
         is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
             orient="records"
         )
+
         return HTMLResponse(
             content=create_detail_fragment(
                 email_meta,
@@ -402,10 +387,11 @@ async def email_detail(email_id: str) -> HTMLResponse:
                 is_in_thread,  # type: ignore[arg-type]
             )
         )
-    else:
+    except (KeyError, ValueError, IndexError) as e:
+        logger.error(f"Failed to load email {email_id}: {e}")
         return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
-            status_code=status.HTTP_404_NOT_FOUND,
+            content="<div class='p-8 text-center text-red-400'>Error: Failed to load email.</div>",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 
