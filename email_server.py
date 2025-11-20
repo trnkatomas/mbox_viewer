@@ -1,4 +1,5 @@
 import datetime
+import logging
 import re
 import time
 from contextlib import asynccontextmanager
@@ -14,6 +15,8 @@ from typing import (
     Union,
 )
 
+logger = logging.getLogger(__name__)
+
 import pandas as pd
 from fastapi import FastAPI, Form, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -21,11 +24,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from email_utils import (
-    EMAIL_DETAILS,
     get_attachment_file,
     get_basic_stats,
     get_domains_by_count,
-    get_email_content,
     get_email_count,
     get_email_list,
     get_email_sizes_in_time,
@@ -186,13 +187,12 @@ def parse_search_input(query: str) -> Dict[str, str]:
     matches_dict: Dict[str, str] = {}
     to_discard: List[int] = []
     for matchNum, match in enumerate(matches, start=1):
-        print(
-            "Match {matchNum} was found at {start}-{end}: {match}".format(
-                matchNum=matchNum,
-                start=match.start(),
-                end=match.end(),
-                match=match.group(),
-            )
+        logger.debug(
+            "Match %d was found at %d-%d: %s",
+            matchNum,
+            match.start(),
+            match.end(),
+            match.group(),
         )
         to_discard.extend(list(range(match.start(), match.end())))
         # Extract the value (either quoted or unquoted)
@@ -236,7 +236,7 @@ async def stats_layout(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
-async def stats_data(query_name: str) -> list:
+async def stats_data(query_name: str) -> List[Dict[str, Any]]:
     """Route to serve the base HTML template."""
     if query_name == "dates_size":
         basic_stats = get_cached_email_sizes_in_time()
@@ -244,11 +244,13 @@ async def stats_data(query_name: str) -> list:
             # Convert date column to ISO format string for JSON serialization if it's datetime
             if pd.api.types.is_datetime64_any_dtype(basic_stats["date"]):
                 basic_stats["date"] = basic_stats["date"].dt.strftime("%Y-%m-%d")
-            return basic_stats.to_dict(orient="records")
+            result: List[Dict[str, Any]] = basic_stats.to_dict(orient="records")  # type: ignore[assignment]
+            return result
     elif query_name == "domains_count":
         domain_stats = get_domains_by_count(db_connections["duckdb"])
         if not domain_stats.empty:
-            return domain_stats.to_dict(orient="records")
+            result: List[Dict[str, Any]] = domain_stats.to_dict(orient="records")  # type: ignore[assignment]
+            return result
     return []
 
 
@@ -418,12 +420,6 @@ async def email_thread_detail(thread_id: str) -> HTMLResponse:
     )
 
     if thread_meta:
-        # for each email in thread
-        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_start'), thread_meta.get('email_end'))
-        # parsed_email = parse_email(email_raw_string)
-        # attachments = parsed_email.get('attachments')
-        # email_content = parsed_email.get('body')
-        # is_in_thread = get_thread_for_email(db_connections['duckdb'], the).to_dict(orient='records')
         return HTMLResponse(
             content=create_thread_detail_fragment(None, None, None, thread_meta)  # type: ignore[arg-type]
         )
