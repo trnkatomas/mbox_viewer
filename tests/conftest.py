@@ -1,10 +1,12 @@
 """Pytest fixtures for mbox_viewer tests."""
-import tempfile
+
 import os
-from pathlib import Path
-import pytest
-import duckdb
+import tempfile
 from email.message import EmailMessage
+from pathlib import Path
+
+import duckdb
+import pytest
 
 
 @pytest.fixture
@@ -53,7 +55,7 @@ JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBl
 
 """
 
-    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.mbox') as f:
+    with tempfile.NamedTemporaryFile(mode="wb", delete=False, suffix=".mbox") as f:
         f.write(content)
         temp_path = f.name
 
@@ -104,7 +106,8 @@ def test_db():
     con = duckdb.connect(":memory:")
 
     # Create emails table
-    con.execute("""
+    con.execute(
+        """
         CREATE TABLE emails (
             message_id VARCHAR PRIMARY KEY,
             subject VARCHAR,
@@ -117,10 +120,12 @@ def test_db():
             thread_id VARCHAR,
             labels VARCHAR
         )
-    """)
+    """
+    )
 
     # Insert sample data
-    con.execute("""
+    con.execute(
+        """
         INSERT INTO emails VALUES
         ('<test1@example.com>', 'Test Email 1', 'sender@example.com',
          '2024-01-01 12:00:00', 'This is the body...', false, 0, 100, 'thread1', 'inbox'),
@@ -128,7 +133,8 @@ def test_db():
          '2024-01-02 13:00:00', 'This is an HTML...', false, 100, 200, 'thread2', 'inbox'),
         ('<test3@example.com>', 'Email with Attachment', 'attach@example.com',
          '2024-01-03 14:00:00', 'This email has...', true, 200, 300, 'thread3', 'sent')
-    """)
+    """
+    )
 
     yield con
 

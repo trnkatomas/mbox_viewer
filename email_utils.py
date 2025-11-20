@@ -1,46 +1,26 @@
 import email
+import io
+import logging  # New import for structured debugging and information
+import os
+import textwrap
 from email.message import Message
+from email.parser import BytesParser
 from email.policy import default
 from functools import lru_cache
-import os
-from typing import Dict, List, Optional, Tuple, Union, Generator
 from types import TracebackType
+from typing import Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from readabilipy import simple_json_from_html_string
-import email
-from email.policy import default
-from email.parser import BytesParser
-import textwrap
-import io
-import logging  # New import for structured debugging and information
 
 # Set up a logger for the module
 logger = logging.getLogger(__name__)
 
 import chromadb
-import requests
-
 import duckdb
-
-EMAIL_DETAILS = [
-    {
-        "id": 2,
-        "subject": "Upcoming Holiday Schedule",
-        "sender": "HR Department <hr@corp.com>",
-        "date": "Oct 14, 2025",
-        "body": '<p class="text-gray-300">All Employees,</p><p class="mt-4 text-gray-300">The holiday schedule is finalized and available on the internal portal.</p>',
-    },
-    {
-        "id": 3,
-        "subject": "Quick Question Regarding the New Logo",
-        "sender": "Mark Smith <mark.smith@design.io>",
-        "date": "Oct 13, 2025",
-        "body": '<p class="text-gray-300">Could you confirm the HEX code for the dark blue in the new logo design?</p>',
-    },
-]
+import requests
 
 # Default MBOX file path - can be overridden with MBOX_FILE_PATH environment variable
 mboxfilename = os.getenv(
@@ -171,18 +151,24 @@ def get_one_thread(db: duckdb.DuckDBPyConnection, thread_id: str) -> pd.DataFram
     return rel.df()
 
 
-def get_email_count(db: duckdb.DuckDBPyConnection, additional_criteria: Optional[Dict[str, str]] = None) -> int:
+def get_email_count(
+    db: duckdb.DuckDBPyConnection, additional_criteria: Optional[Dict[str, str]] = None
+) -> int:
     if additional_criteria:
-        additional_conditions, where_statements = process_additional_criteria(additional_criteria)
+        additional_conditions, where_statements = process_additional_criteria(
+            additional_criteria
+        )
         if where_statements:
             where_statement = " AND ".join(where_statements)
             rel = db.execute(
                 f"with conditional_selection as (select * from emails where {where_statement} order by date desc)"
                 f"select count(distinct message_id) as email_count from conditional_selection",
-                additional_conditions
+                additional_conditions,
             )
         else:
-            rel = db.execute("select count(distinct message_id) as email_count from emails")
+            rel = db.execute(
+                "select count(distinct message_id) as email_count from emails"
+            )
     else:
         rel = db.execute("select count(distinct message_id) as email_count from emails")
     df = rel.df()
@@ -192,7 +178,9 @@ def get_email_count(db: duckdb.DuckDBPyConnection, additional_criteria: Optional
         return 0
 
 
-def get_attachment_file(db: duckdb.DuckDBPyConnection, email_id: str, attachment_name: str) -> Dict[str, Union[str, bytes, int]]:
+def get_attachment_file(
+    db: duckdb.DuckDBPyConnection, email_id: str, attachment_name: str
+) -> Dict[str, Union[str, bytes, int]]:
     email_data_list = get_one_email(db, email_id=email_id).to_dict(orient="records")
     if isinstance(email_data_list, list) and email_data_list:
         email_data = email_data_list[0]
@@ -329,7 +317,9 @@ def _extract_body_content(msg: Message) -> Tuple[str, Optional[str]]:
 
 def parse_email(
     raw_email: bytes,
-) -> Dict[str, Union[Tuple[str, Optional[str]], List[Dict[str, Union[str, bytes, int]]]]]:
+) -> Dict[
+    str, Union[Tuple[str, Optional[str]], List[Dict[str, Union[str, bytes, int]]]]
+]:
     """
     Parses a raw email string to extract prioritized body content and all attachments.
 
@@ -368,54 +358,13 @@ def get_string_email_from_mboxfile(email_start: int, email_end: int) -> bytes:
         return data
 
 
-def get_email_content(email_start: int, email_end: int) -> str:
-    with open(mboxfilename, "rb") as infile:
-        infile.seek(email_start)
-        data = infile.read(email_end - email_start)
-        parsed_email = email.message_from_bytes(data, policy=default)
-        email_content = _extract_body_content(parsed_email)
-        email_attachments = _extract_attachments(parsed_email)
-
-        content = ""
-        try:
-            if len(list(parsed_email.iter_parts())) > 0:
-                for part in parsed_email.iter_parts():
-                    disposition = part.get("Content-Disposition")
-                    if disposition and "attachment" in disposition:
-                        continue
-                    current_content = to_string(part.get_content())
-                    content += current_content
-            else:
-                content = to_string(parsed_email.get_content())
-        except Exception as e:
-            print(e)
-        for a in parsed_email.iter_attachments():
-            # TODO return attachments, generate new email block for getting the attachments from the source file
-            print(f"attachment: {a.get_filename()}")
-        return content
-
-
 def surround_with_wildcards(input: str) -> str:
     return f"%{input}%"
 
 
-def get_similar_vectors(
-    db: duckdb.DuckDBPyConnection, vec: npt.NDArray[np.float64]
-) -> pd.DataFrame:
-    rel = db.execute("""SELECT *, array_distance(vec, ?::FLOAT[768]) as dist
-    FROM
-    embeddings
-    ORDER
-    BY
-    dist
-    LIMIT
-    20;""",
-        [vec],
-    )
-    return rel.df()
-
-
-def process_additional_criteria(additional_criteria: Optional[Dict[str, str]]) -> Tuple[List[str], List[str]]:
+def process_additional_criteria(
+    additional_criteria: Optional[Dict[str, str]],
+) -> Tuple[List[str], List[str]]:
     additional_conditions = []
     where_statements = []
     if additional_criteria:
@@ -439,10 +388,7 @@ def process_additional_criteria(additional_criteria: Optional[Dict[str, str]]) -
                 additional_conditions.append(surround_with_wildcards(excerpt))
 
         # Date range filters
-        if (
-                "from_date" in additional_criteria
-                and additional_criteria["from_date"]
-        ):
+        if "from_date" in additional_criteria and additional_criteria["from_date"]:
             where_statements.append("date >= ?")
             additional_conditions.append(additional_criteria["from_date"])
 
@@ -453,7 +399,11 @@ def process_additional_criteria(additional_criteria: Optional[Dict[str, str]]) -
 
 
 def get_email_list(
-    db: duckdb.DuckDBPyConnection, criteria: Optional[Dict[str, int]] = None, additional_criteria: Optional[Dict[str, str]] = None, sent: bool = False, rag_message_ids: Optional[List[str]] = None
+    db: duckdb.DuckDBPyConnection,
+    criteria: Optional[Dict[str, int]] = None,
+    additional_criteria: Optional[Dict[str, str]] = None,
+    sent: bool = False,
+    rag_message_ids: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
     Get email list with optional filtering.
@@ -470,7 +420,9 @@ def get_email_list(
         return rel.df()
     else:
         if "limit" in criteria and "offset" in criteria:
-            additional_conditions, where_statements = process_additional_criteria(additional_criteria)
+            additional_conditions, where_statements = process_additional_criteria(
+                additional_criteria
+            )
             # Sent folder filter
             if sent:
                 where_statements.append("? IN labels")
@@ -500,7 +452,9 @@ def get_email_list(
         return db.df()
 
 
-def load_email_content_search(db: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+def load_email_content_search(
+    db: duckdb.DuckDBPyConnection,
+) -> duckdb.DuckDBPyConnection:
     """
     Initialize DuckDB for vector search by installing and loading VSS extension.
 
@@ -521,7 +475,9 @@ def load_email_content_search(db: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyC
     return db
 
 
-def get_ollama_embedding(text: str, server_url: Optional[str] = None, model: Optional[str] = None) -> Optional[List[float]]:
+def get_ollama_embedding(
+    text: str, server_url: Optional[str] = None, model: Optional[str] = None
+) -> Optional[List[float]]:
     """
     Get embedding vector from Ollama server.
 
@@ -549,7 +505,11 @@ def get_ollama_embedding(text: str, server_url: Optional[str] = None, model: Opt
             result = response.json()
             # Ollama returns embeddings in different formats depending on version
             if "embeddings" in result:
-                emb = result["embeddings"][0] if isinstance(result["embeddings"], list) else result["embeddings"]
+                emb = (
+                    result["embeddings"][0]
+                    if isinstance(result["embeddings"], list)
+                    else result["embeddings"]
+                )
                 return emb  # type: ignore[no-any-return]
             elif "embedding" in result:
                 return result["embedding"]  # type: ignore[no-any-return]
@@ -564,7 +524,14 @@ def get_ollama_embedding(text: str, server_url: Optional[str] = None, model: Opt
         return None
 
 
-def rag_search_duckdb(db: duckdb.DuckDBPyConnection, query_text: str, n_results: int = 50) -> pd.DataFrame:
+# Global constants for RAG search embedding
+query_prefix = "task: search result | query: "
+document_prefix = "title: none | text: "
+
+
+def rag_search_duckdb(
+    db: duckdb.DuckDBPyConnection, query_text: str, n_results: int = 50
+) -> pd.DataFrame:
     """
     Perform semantic search using DuckDB's VSS extension with cosine distance.
 
@@ -627,7 +594,6 @@ def process(drop_previous_table: bool = False) -> None:
     import numpy as np
     import tqdm
     from dateparser import parse
-
     from sentence_transformers import CrossEncoder
 
     # DBs initialization
@@ -692,7 +658,8 @@ def process(drop_previous_table: bool = False) -> None:
                         content = to_string(message.get_content())
                     parsed = simple_json_from_html_string(content)
                     whole_text = "\n".join([x["text"] for x in parsed["plain_text"]])
-                except:
+                except Exception as e:
+                    logger.warning(f"Failed to parse email content: {e}")
                     pass
                 if not message["Message-ID"]:
                     continue
@@ -700,7 +667,7 @@ def process(drop_previous_table: bool = False) -> None:
                     ids=[message["Message-ID"]], documents=[whole_text]
                 )
                 # the content should be chunked into ~ 500 tokens
-                d_encoded = ollama_embeddings(
+                d_encoded = get_ollama_embedding(
                     document_prefix + whole_text,
                     "http://localhost:11434/api/embed",
                     "embeddinggemma",
@@ -758,7 +725,9 @@ def process(drop_previous_table: bool = False) -> None:
 
     print(res.df())
 
-    def query_collection(collection: chromadb.Collection, query: str) -> Dict[str, List[List[str]]]:
+    def query_collection(
+        collection: chromadb.Collection, query: str
+    ) -> Dict[str, List[List[str]]]:
         # Query the results
         query = "vyrizena objednavka"
         results = collection.query(query_texts=[query], n_results=2)
@@ -768,19 +737,6 @@ def process(drop_previous_table: bool = False) -> None:
             scores = model.predict([(query, doc) for doc in documents[0]])
             print(documents[0][np.argmax(scores)])
         return results  # type: ignore[return-value]
-
-
-query_prefix = "task: search result | query: "
-document_prefix = "title: none | text: "
-
-
-def ollama_embeddings(text: str, server_url: str, model: str) -> npt.NDArray[np.float64]:
-    response = requests.post(server_url, json={"model": model, "input": text})
-    if response.status_code == 200:
-        json_data = response.json()
-        return np.squeeze(np.array(json_data["embeddings"]))
-    else:
-        return np.array([])
 
 
 if __name__ == "__main__":
@@ -795,50 +751,3 @@ if __name__ == "__main__":
     # process(parsed_args.delete_table)
     # be careful the database creation took an hour and a half
     process(drop_previous_table=False)
-
-
-"""
-    import requests
-
-    a = ollama_embeddings(
-        "what the heck is going on",
-        "http://localhost:11434/api/embed",
-        "embeddinggemma",
-    )
-
-    query = "Which planet is known as the Red Planet?"
-    documents = [
-        "Venus is often called Earth's twin because of its similar size and proximity.",
-        "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
-        "Jupiter, the largest planet in our solar system, has a prominent red spot.",
-        "Saturn, famous for its rings, is sometimes mistaken for the Red Planet.",
-    ]
-
-    from sklearn.metrics.pairwise import cosine_similarity
-    import numpy as np
-
-    def get_distances(documents, queries):
-
-        q_encoded = [
-            ollama_embeddings(
-                query_prefix + q, "http://localhost:11434/api/embed", "embeddinggemma"
-            )
-            for q in queries
-        ]
-        d_encoded = [
-            ollama_embeddings(
-                document_prefix + d,
-                "http://localhost:11434/api/embed",
-                "embeddinggemma",
-            )
-            for d in documents
-        ]
-
-        d_emb = np.vstack([np.array(d["embeddings"]) for d in d_encoded])
-        q_emb = np.vstack([np.array(q["embeddings"]) for q in q_encoded])
-
-        print(q_emb.shape, d_emb.shape)
-        return cosine_similarity(q_emb, d_emb)
-
-    # supposed output array([[0.30018332, 0.63578754, 0.49253921, 0.48859104]])
-"""

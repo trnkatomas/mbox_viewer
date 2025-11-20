@@ -1,32 +1,42 @@
 import datetime
+import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
-import re
-from typing import Optional, Annotated, Dict, List, Union, AsyncGenerator, TYPE_CHECKING, Any
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    AsyncGenerator,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
 
-from fastapi import FastAPI, Query, Request, status, Form
-from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
+logger = logging.getLogger(__name__)
+
+import pandas as pd
+from fastapi import FastAPI, Form, Query, Request, status
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import pandas as pd
 
 from email_utils import (
-    EMAIL_DETAILS,
+    get_attachment_file,
+    get_basic_stats,
+    get_domains_by_count,
     get_email_count,
-    get_email_content,
     get_email_list,
+    get_email_sizes_in_time,
     get_one_email,
     get_one_thread,
+    get_string_email_from_mboxfile,
+    get_thread_for_email,
     load_email_content_search,
     load_email_db,
-    get_string_email_from_mboxfile,
     parse_email,
-    get_attachment_file,
-    get_thread_for_email,
-    get_basic_stats,
-    get_email_sizes_in_time,
-    get_domains_by_count,
 )
 
 if TYPE_CHECKING:
@@ -140,8 +150,12 @@ def create_thread_detail_fragment(
             email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
             parsed_email = parse_email(email_raw_string)
             # Enrich the email dict with parsed content
-            enriched_email: Dict[str, Any] = dict(email)  # Create a copy with flexible typing
-            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[1]  # Get HTML content
+            enriched_email: Dict[str, Any] = dict(
+                email
+            )  # Create a copy with flexible typing
+            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[
+                1
+            ]  # Get HTML content
             enriched_email["attachments"] = parsed_email.get("attachments", [])
             enriched_thread.append(enriched_email)
         else:
@@ -173,13 +187,12 @@ def parse_search_input(query: str) -> Dict[str, str]:
     matches_dict: Dict[str, str] = {}
     to_discard: List[int] = []
     for matchNum, match in enumerate(matches, start=1):
-        print(
-            "Match {matchNum} was found at {start}-{end}: {match}".format(
-                matchNum=matchNum,
-                start=match.start(),
-                end=match.end(),
-                match=match.group(),
-            )
+        logger.debug(
+            "Match %d was found at %d-%d: %s",
+            matchNum,
+            match.start(),
+            match.end(),
+            match.group(),
         )
         to_discard.extend(list(range(match.start(), match.end())))
         # Extract the value (either quoted or unquoted)
@@ -223,19 +236,19 @@ async def stats_layout(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
-async def stats_data(query_name: str) -> list:
+async def stats_data(query_name: str) -> List[Dict[str, Any]]:
     """Route to serve the base HTML template."""
     if query_name == "dates_size":
         basic_stats = get_cached_email_sizes_in_time()
         if not basic_stats.empty:
             # Convert date column to ISO format string for JSON serialization if it's datetime
-            if pd.api.types.is_datetime64_any_dtype(basic_stats['date']):
-                basic_stats['date'] = basic_stats['date'].dt.strftime('%Y-%m-%d')
-            return basic_stats.to_dict(orient="records")
+            if pd.api.types.is_datetime64_any_dtype(basic_stats["date"]):
+                basic_stats["date"] = basic_stats["date"].dt.strftime("%Y-%m-%d")
+            return basic_stats.to_dict(orient="records")  # type: ignore[return-value]
     elif query_name == "domains_count":
         domain_stats = get_domains_by_count(db_connections["duckdb"])
         if not domain_stats.empty:
-            return domain_stats.to_dict(orient="records")
+            return domain_stats.to_dict(orient="records")  # type: ignore[return-value]
     return []
 
 
@@ -291,14 +304,22 @@ async def email_list(
     db_conn = db_connections["duckdb"]
     page_emails_df = get_email_list(
         db_conn,
-        criteria={"limit": EMAILS_PER_PAGE, "offset": start_index} if rag_message_ids is None else {"limit": EMAILS_PER_PAGE, "offset": 0},
+        criteria=(
+            {"limit": EMAILS_PER_PAGE, "offset": start_index}
+            if rag_message_ids is None
+            else {"limit": EMAILS_PER_PAGE, "offset": 0}
+        ),
         additional_criteria=additional_criteria,
         sent=folder == "Sent",
-        rag_message_ids=rag_message_ids[start_index:end_index]["message_id"].tolist() if rag_message_ids is not None and not rag_message_ids.empty else None,
+        rag_message_ids=(
+            rag_message_ids[start_index:end_index]["message_id"].tolist()
+            if rag_message_ids is not None and not rag_message_ids.empty
+            else None
+        ),
     )
     if rag_message_ids is not None and not rag_message_ids.empty:
         page_emails_df = pd.merge(
-            page_emails_df, rag_message_ids[['message_id', 'dist']], on="message_id"
+            page_emails_df, rag_message_ids[["message_id", "dist"]], on="message_id"
         ).sort_values(by="dist", ascending=True)
 
     page_emails = page_emails_df.to_dict(orient="records")
@@ -307,7 +328,9 @@ async def email_list(
     elif additional_criteria:
         all_emails = get_email_count(db_conn, additional_criteria)
     else:
-        all_emails = get_email_count(db_conn) # TODO this should reflect the size of the currently retrieved results
+        all_emails = get_email_count(
+            db_conn
+        )  # TODO this should reflect the size of the currently retrieved results
     html_fragments = ""
 
     has_more = end_index < all_emails
@@ -373,7 +396,10 @@ async def email_detail(email_id: str) -> HTMLResponse:
         )
         return HTMLResponse(
             content=create_detail_fragment(
-                email_meta, email_content[1], attachments, is_in_thread,  # type: ignore[index, arg-type]
+                email_meta,
+                email_content[1] if email_content else None,  # type: ignore[arg-type]
+                attachments,  # type: ignore[arg-type]
+                is_in_thread,  # type: ignore[arg-type]
             )
         )
     else:
@@ -392,12 +418,6 @@ async def email_thread_detail(thread_id: str) -> HTMLResponse:
     )
 
     if thread_meta:
-        # for each email in thread
-        # email_raw_string = get_string_email_from_mboxfile(thread_meta.get('email_start'), thread_meta.get('email_end'))
-        # parsed_email = parse_email(email_raw_string)
-        # attachments = parsed_email.get('attachments')
-        # email_content = parsed_email.get('body')
-        # is_in_thread = get_thread_for_email(db_connections['duckdb'], the).to_dict(orient='records')
         return HTMLResponse(
             content=create_thread_detail_fragment(None, None, None, thread_meta)  # type: ignore[arg-type]
         )
@@ -438,4 +458,5 @@ async def get_attachment(email_id: str, attachment_id: str) -> Response:
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("email_server:app", host="0.0.0.0", port=8000, reload=True)

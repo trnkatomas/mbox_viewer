@@ -1,18 +1,21 @@
 """Tests for email_utils.py functions."""
-import pytest
-from email_utils import (
-    to_string,
-    parse_email,
-    get_one_email,
-    get_email_count,
-    get_one_thread,
-    get_basic_stats,
-    get_email_sizes_in_time,
-    MboxReader,
-    _extract_body_content,
-)
+
 from email.parser import BytesParser
 from email.policy import default
+
+import pytest
+
+from email_utils import (
+    MboxReader,
+    _extract_body_content,
+    get_basic_stats,
+    get_email_count,
+    get_email_sizes_in_time,
+    get_one_email,
+    get_one_thread,
+    parse_email,
+    to_string,
+)
 
 
 class TestToString:
@@ -48,27 +51,27 @@ class TestParseEmail:
         """Test parsing a plain text email."""
         result = parse_email(sample_email_plain)
 
-        assert 'body' in result
-        assert 'attachments' in result
-        body_type, body_content = result['body']
-        assert body_type == 'Plain Text'
-        assert 'plain text email' in body_content
+        assert "body" in result
+        assert "attachments" in result
+        body_type, body_content = result["body"]
+        assert body_type == "Plain Text"
+        assert "plain text email" in body_content
 
     def test_parse_html_email(self, sample_email_html):
         """Test parsing an HTML email."""
         result = parse_email(sample_email_html)
 
-        assert 'body' in result
-        body_type, body_content = result['body']
-        assert body_type == 'HTML'
-        assert 'Hello World' in body_content
+        assert "body" in result
+        body_type, body_content = result["body"]
+        assert body_type == "HTML"
+        assert "Hello World" in body_content
 
     def test_parse_invalid_email(self):
         """Test parsing invalid email data."""
         result = parse_email(b"Not a valid email")
         # Should not crash, but may return error or empty body
-        assert 'body' in result
-        assert 'attachments' in result
+        assert "body" in result
+        assert "attachments" in result
 
 
 class TestExtractBodyContent:
@@ -79,16 +82,16 @@ class TestExtractBodyContent:
         msg = BytesParser(policy=default).parsebytes(sample_email_plain)
         body_type, body_content = _extract_body_content(msg)
 
-        assert body_type == 'Plain Text'
-        assert 'plain text email' in body_content
+        assert body_type == "Plain Text"
+        assert "plain text email" in body_content
 
     def test_extract_html(self, sample_email_html):
         """Test extracting HTML body."""
         msg = BytesParser(policy=default).parsebytes(sample_email_html)
         body_type, body_content = _extract_body_content(msg)
 
-        assert body_type == 'HTML'
-        assert '<h1>Hello World</h1>' in body_content
+        assert body_type == "HTML"
+        assert "<h1>Hello World</h1>" in body_content
 
     def test_html_priority_over_plain(self):
         """Test that HTML is prioritized over plain text."""
@@ -113,8 +116,8 @@ Content-Type: text/html
         msg = BytesParser(policy=default).parsebytes(multipart_email)
         body_type, body_content = _extract_body_content(msg)
 
-        assert body_type == 'HTML'
-        assert 'HTML version' in body_content
+        assert body_type == "HTML"
+        assert "HTML version" in body_content
 
 
 class TestMboxReader:
@@ -128,8 +131,8 @@ class TestMboxReader:
         assert len(emails) == 3
         # Each item should be (message, (start_pos, end_pos))
         msg1, pos1 = emails[0]
-        assert msg1['Subject'] == 'Test Email 1'
-        assert msg1['From'] == 'sender@example.com'
+        assert msg1["Subject"] == "Test Email 1"
+        assert msg1["From"] == "sender@example.com"
 
     def test_mbox_context_manager(self, sample_mbox_file):
         """Test that MboxReader works as context manager."""
@@ -155,15 +158,15 @@ class TestDatabaseFunctions:
 
     def test_get_one_email(self, test_db):
         """Test retrieving a single email."""
-        result = get_one_email(test_db, '<test1@example.com>')
+        result = get_one_email(test_db, "<test1@example.com>")
 
         assert not result.empty
-        assert result.iloc[0]['subject'] == 'Test Email 1'
-        assert result.iloc[0]['from_email'] == 'sender@example.com'
+        assert result.iloc[0]["subject"] == "Test Email 1"
+        assert result.iloc[0]["from_email"] == "sender@example.com"
 
     def test_get_one_email_not_found(self, test_db):
         """Test retrieving non-existent email."""
-        result = get_one_email(test_db, '<nonexistent@example.com>')
+        result = get_one_email(test_db, "<nonexistent@example.com>")
         assert result.empty
 
     def test_get_email_count(self, test_db):
@@ -174,8 +177,10 @@ class TestDatabaseFunctions:
     def test_get_email_count_empty_db(self):
         """Test count on empty database."""
         import duckdb
+
         empty_db = duckdb.connect(":memory:")
-        empty_db.execute("""
+        empty_db.execute(
+            """
             CREATE TABLE emails (
                 message_id VARCHAR PRIMARY KEY,
                 subject VARCHAR,
@@ -188,7 +193,8 @@ class TestDatabaseFunctions:
                 thread_id VARCHAR,
                 labels VARCHAR
             )
-        """)
+        """
+        )
 
         count = get_email_count(empty_db)
         assert count == 0
@@ -196,10 +202,10 @@ class TestDatabaseFunctions:
 
     def test_get_one_thread(self, test_db):
         """Test retrieving emails in a thread."""
-        result = get_one_thread(test_db, 'thread1')
+        result = get_one_thread(test_db, "thread1")
 
         assert not result.empty
-        assert all(result['thread_id'] == 'thread1')
+        assert all(result["thread_id"] == "thread1")
 
     def test_get_basic_stats(self, test_db):
         """Test retrieving basic statistics."""
@@ -214,12 +220,12 @@ class TestDatabaseFunctions:
         assert not all_timespan.empty
 
         # Check email count
-        assert all_emails.iloc[0]['all_emails'] == 3
+        assert all_emails.iloc[0]["all_emails"] == 3
 
     def test_get_email_sizes_in_time(self, test_db):
         """Test getting email size statistics over time."""
         result = get_email_sizes_in_time(test_db)
 
         assert not result.empty
-        assert 'date' in result.columns
-        assert 'count' in result.columns
+        assert "date" in result.columns
+        assert "count" in result.columns
