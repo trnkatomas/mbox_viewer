@@ -34,19 +34,53 @@ def parse_search_query(query: str) -> Dict[str, str]:
     """
     Parse search query string into structured criteria.
 
-    Extracts special filters like from:, subject:, rag:, from_date:, to_date:
+    Extracts special filters like from:, subject:, rag:, from_date:, to_date:, label:
 
     Args:
         query: Raw search query string
 
     Returns:
-        Dictionary of search criteria
+        Dictionary of search criteria with:
+        - Extracted filter values (from, subject, rag, from_date, to_date, label)
+        - excerpt: Remaining text after filters are removed
 
     Example:
-        >>> parse_search_query("from:john@example.com subject:meeting")
-        {'from': 'john@example.com', 'subject': 'meeting'}
+        >>> parse_search_query("from:john@example.com subject:meeting important")
+        {'from': 'john@example.com', 'subject': 'meeting', 'excerpt': 'important'}
+
+    Supported filters:
+    - from:email - Filter by sender
+    - subject:text - Filter by subject (supports quoted strings)
+    - rag:text - Semantic search query
+    - from_date:YYYY-MM-DD - Filter from date
+    - to_date:YYYY-MM-DD - Filter to date
+    - label:text - Filter by label
     """
-    raise NotImplementedError("To be implemented in Phase 2")
+    import re
+
+    regex = r"(from|subject|rag|from_date|to_date|label):(\"(.*)\"|([^ \n]+))"
+    matches = re.finditer(regex, query, re.MULTILINE)
+    matches_dict: Dict[str, str] = {}
+    to_discard: List[int] = []
+
+    for matchNum, match in enumerate(matches, start=1):
+        logger.debug(
+            "Match %d was found at %d-%d: %s",
+            matchNum,
+            match.start(),
+            match.end(),
+            match.group(),
+        )
+        to_discard.extend(list(range(match.start(), match.end())))
+        # Extract the value (either quoted or unquoted)
+        value = match[3] if match[3] else match[4]
+        matches_dict.update({match[1]: value})
+
+    # Extract remainder as excerpt
+    remainder = [c for i, c in enumerate(query) if i not in to_discard]
+    matches_dict["excerpt"] = "".join(remainder).strip()
+
+    return matches_dict
 
 
 def search_emails(
