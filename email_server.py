@@ -244,13 +244,11 @@ async def stats_data(query_name: str) -> List[Dict[str, Any]]:
             # Convert date column to ISO format string for JSON serialization if it's datetime
             if pd.api.types.is_datetime64_any_dtype(basic_stats["date"]):
                 basic_stats["date"] = basic_stats["date"].dt.strftime("%Y-%m-%d")
-            result: List[Dict[str, Any]] = basic_stats.to_dict(orient="records")  # type: ignore[assignment]
-            return result
+            return basic_stats.to_dict(orient="records")  # type: ignore[return-value]
     elif query_name == "domains_count":
         domain_stats = get_domains_by_count(db_connections["duckdb"])
         if not domain_stats.empty:
-            result: List[Dict[str, Any]] = domain_stats.to_dict(orient="records")  # type: ignore[assignment]
-            return result
+            return domain_stats.to_dict(orient="records")  # type: ignore[return-value]
     return []
 
 
@@ -399,9 +397,9 @@ async def email_detail(email_id: str) -> HTMLResponse:
         return HTMLResponse(
             content=create_detail_fragment(
                 email_meta,
-                email_content[1],
-                attachments,
-                is_in_thread,  # type: ignore[index, arg-type]
+                email_content[1] if email_content else None,  # type: ignore[arg-type]
+                attachments,  # type: ignore[arg-type]
+                is_in_thread,  # type: ignore[arg-type]
             )
         )
     else:
