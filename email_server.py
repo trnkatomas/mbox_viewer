@@ -48,16 +48,37 @@ db_connections: Dict[str, Union["duckdb.DuckDBPyConnection"]] = {}
 EMAILS_PER_PAGE = 5
 
 
-# Cached wrapper functions for stats (cached with LRU, maxsize=128)
-@lru_cache(maxsize=128)
+# Singleton cache for database stats
+# IMPORTANT: These functions have maxsize=1 because they take no parameters.
+# The database is opened in READ-ONLY mode and data can only change when:
+# 1. Server is stopped
+# 2. Mbox is reprocessed and database is updated
+# 3. Server is restarted
+# Therefore, caching the first call's result for the entire server lifetime is correct.
+# The cache will contain exactly 1 entry and never invalidate during runtime.
+@lru_cache(maxsize=1)
 def get_cached_basic_stats() -> List[pd.DataFrame]:
-    """Cached version of get_basic_stats."""
+    """
+    Get basic email statistics (cached for server lifetime).
+
+    This is cached because:
+    - DB is read-only during server runtime
+    - Stats only change when mbox is reprocessed (requires server restart)
+    - First call loads stats, subsequent calls return cached result
+    """
     return get_basic_stats(db_connections["duckdb"])
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=1)
 def get_cached_email_sizes_in_time() -> pd.DataFrame:
-    """Cached version of get_email_sizes_in_time."""
+    """
+    Get email size statistics over time (cached for server lifetime).
+
+    This is cached because:
+    - DB is read-only during server runtime
+    - Stats only change when mbox is reprocessed (requires server restart)
+    - First call loads stats, subsequent calls return cached result
+    """
     return get_email_sizes_in_time(db_connections["duckdb"])
 
 
