@@ -4,6 +4,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from collections.abc import Mapping
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -112,7 +113,7 @@ def create_list_item_fragment(
 
 
 def create_detail_fragment(
-    email_meta: Dict[str, Union[str, int]],
+    email_meta: Mapping[Any, Any],
     email_content: Optional[str],
     attachments: List[Dict[str, Union[str, bytes, int]]],
     is_in_thread: List[Dict[str, Union[str, int]]],

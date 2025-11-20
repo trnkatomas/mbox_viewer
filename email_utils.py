@@ -10,6 +10,7 @@ from email.parser import BytesParser
 from email.policy import default
 from functools import lru_cache
 from types import TracebackType
+from collections.abc import Mapping
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
@@ -46,7 +47,7 @@ class Email:
     line: Optional[int] = None
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Email":
+    def from_dict(cls, data: Mapping[Any, Any]) -> "Email":
         """Create Email from dictionary (e.g., from DataFrame record)."""
         return cls(
             message_id=data["message_id"],
