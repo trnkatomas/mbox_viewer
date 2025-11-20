@@ -4,40 +4,24 @@ import re
 import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import (
-    TYPE_CHECKING,
-    Annotated,
-    Any,
-    AsyncGenerator,
-    Dict,
-    List,
-    Optional,
-    Union,
-)
+from typing import (TYPE_CHECKING, Annotated, Any, AsyncGenerator, Dict, List,
+                    Optional, Union)
 
 logger = logging.getLogger(__name__)
 
 import pandas as pd
 from fastapi import FastAPI, Form, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               Response)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from email_utils import (
-    get_attachment_file,
-    get_basic_stats,
-    get_domains_by_count,
-    get_email_count,
-    get_email_list,
-    get_email_sizes_in_time,
-    get_one_email,
-    get_one_thread,
-    get_string_email_from_mboxfile,
-    get_thread_for_email,
-    load_email_content_search,
-    load_email_db,
-    parse_email,
-)
+from email_utils import (get_attachment_file, get_basic_stats,
+                         get_domains_by_count, get_email_count, get_email_list,
+                         get_email_sizes_in_time, get_one_email,
+                         get_one_thread, get_string_email_from_mboxfile,
+                         get_thread_for_email, load_email_content_search,
+                         load_email_db, parse_email)
 
 if TYPE_CHECKING:
     import duckdb
@@ -47,16 +31,37 @@ db_connections: Dict[str, Union["duckdb.DuckDBPyConnection"]] = {}
 EMAILS_PER_PAGE = 5
 
 
-# Cached wrapper functions for stats (cached with LRU, maxsize=128)
-@lru_cache(maxsize=128)
+# Singleton cache for database stats
+# IMPORTANT: These functions have maxsize=1 because they take no parameters.
+# The database is opened in READ-ONLY mode and data can only change when:
+# 1. Server is stopped
+# 2. Mbox is reprocessed and database is updated
+# 3. Server is restarted
+# Therefore, caching the first call's result for the entire server lifetime is correct.
+# The cache will contain exactly 1 entry and never invalidate during runtime.
+@lru_cache(maxsize=1)
 def get_cached_basic_stats() -> List[pd.DataFrame]:
-    """Cached version of get_basic_stats."""
+    """
+    Get basic email statistics (cached for server lifetime).
+
+    This is cached because:
+    - DB is read-only during server runtime
+    - Stats only change when mbox is reprocessed (requires server restart)
+    - First call loads stats, subsequent calls return cached result
+    """
     return get_basic_stats(db_connections["duckdb"])
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=1)
 def get_cached_email_sizes_in_time() -> pd.DataFrame:
-    """Cached version of get_email_sizes_in_time."""
+    """
+    Get email size statistics over time (cached for server lifetime).
+
+    This is cached because:
+    - DB is read-only during server runtime
+    - Stats only change when mbox is reprocessed (requires server restart)
+    - First call loads stats, subsequent calls return cached result
+    """
     return get_email_sizes_in_time(db_connections["duckdb"])
 
 
