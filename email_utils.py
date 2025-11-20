@@ -3,12 +3,15 @@ import io
 import logging  # New import for structured debugging and information
 import os
 import textwrap
+from dataclasses import dataclass
+from datetime import datetime
 from email.message import Message
 from email.parser import BytesParser
 from email.policy import default
 from functools import lru_cache
 from types import TracebackType
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from collections.abc import Mapping
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -21,6 +24,49 @@ logger = logging.getLogger(__name__)
 import chromadb
 import duckdb
 import requests
+
+
+@dataclass
+class Email:
+    """Email metadata from database."""
+
+    message_id: str
+    subject: str
+    from_email: str
+    to_email: str
+    date: datetime
+    excerpt: str
+    has_attachment: int
+    email_start: int
+    email_end: int
+    thread_id: str
+    labels: List[str]
+    content_type: Optional[str] = None
+    mbox_file_id: Optional[str] = None
+    i: Optional[int] = None
+    line: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[Any, Any]) -> "Email":
+        """Create Email from dictionary (e.g., from DataFrame record)."""
+        return cls(
+            message_id=data["message_id"],
+            subject=data.get("subject", ""),
+            from_email=data.get("from_email", ""),
+            to_email=data.get("to_email", ""),
+            date=data["date"],
+            excerpt=data.get("excerpt", ""),
+            has_attachment=data.get("has_attachment", 0),
+            email_start=data["email_start"],
+            email_end=data["email_end"],
+            thread_id=data.get("thread_id", ""),
+            labels=data.get("labels", []),
+            content_type=data.get("content_type"),
+            mbox_file_id=data.get("mbox_file_id"),
+            i=data.get("i"),
+            line=data.get("line"),
+        )
+
 
 # Default MBOX file path - can be overridden with MBOX_FILE_PATH environment variable
 mboxfilename = os.getenv(
@@ -350,6 +396,24 @@ def parse_email(
     return {"body": body_info, "attachments": attachments_list}
 
 
+def load_and_parse_email(
+    email: Email,
+) -> Dict[
+    str, Union[Tuple[str, Optional[str]], List[Dict[str, Union[str, bytes, int]]]]
+]:
+    """
+    Load and parse email from mbox file given Email dataclass.
+
+    Args:
+        email: Email dataclass with email_start and email_end
+
+    Returns:
+        Parsed email dictionary with 'body' and 'attachments'
+    """
+    email_raw = get_string_email_from_mboxfile(email.email_start, email.email_end)
+    return parse_email(email_raw)
+
+
 @lru_cache(maxsize=512)
 def get_string_email_from_mboxfile(email_start: int, email_end: int) -> bytes:
     with open(mboxfilename, "rb") as infile:
@@ -667,7 +731,7 @@ def process(drop_previous_table: bool = False) -> None:
                     ids=[message["Message-ID"]], documents=[whole_text]
                 )
                 # the content should be chunked into ~ 500 tokens
-                d_encoded = ollama_embeddings(
+                d_encoded = get_ollama_embedding(
                     document_prefix + whole_text,
                     "http://localhost:11434/api/embed",
                     "embeddinggemma",
