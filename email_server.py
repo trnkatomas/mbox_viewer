@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from email_service import parse_search_query
 from email_utils import (
     Email,
     get_attachment_file,
@@ -187,38 +188,6 @@ def create_thread_detail_fragment(
     return output
 
 
-def parse_search_input(query: str) -> Dict[str, str]:
-    """
-    Parse search query for special filters.
-
-    Supported filters:
-    - from:email - Filter by sender
-    - subject:text - Filter by subject
-    - rag:text - Semantic search
-    - from_date:YYYY-MM-DD - Filter from date
-    - to_date:YYYY-MM-DD - Filter to date
-    """
-    regex = r"(from|subject|rag|from_date|to_date|label):(\"(.*)\"|([^ \n]+))"
-    matches = re.finditer(regex, query, re.MULTILINE)
-    matches_dict: Dict[str, str] = {}
-    to_discard: List[int] = []
-    for matchNum, match in enumerate(matches, start=1):
-        logger.debug(
-            "Match %d was found at %d-%d: %s",
-            matchNum,
-            match.start(),
-            match.end(),
-            match.group(),
-        )
-        to_discard.extend(list(range(match.start(), match.end())))
-        # Extract the value (either quoted or unquoted)
-        value = match[3] if match[3] else match[4]
-        matches_dict.update({match[1]: value})
-    remainder = [c for i, c in enumerate(query) if i not in to_discard]
-    matches_dict["excerpt"] = "".join(remainder).strip()
-    return matches_dict
-
-
 # --- FastAPI Routes ---
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
@@ -282,7 +251,7 @@ async def sent_layout(request: Request) -> HTMLResponse:
 
 @app.post("/api/search", response_class=HTMLResponse)
 async def handle_search(search_input: Annotated[str, Form()]) -> HTMLResponse:
-    parsed_search_query = parse_search_input(search_input)
+    parsed_search_query = parse_search_query(search_input)
     return await email_list(page=1, query=search_input)
 
 
@@ -299,7 +268,7 @@ async def email_list(
 
     # Parse search query if provided
     if query:
-        additional_criteria = parse_search_input(query)
+        additional_criteria = parse_search_query(query)
     else:
         additional_criteria = None
 
