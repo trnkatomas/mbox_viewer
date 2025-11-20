@@ -4,6 +4,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from collections.abc import Mapping
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from email_utils import (
+    Email,
     get_attachment_file,
     get_basic_stats,
     get_domains_by_count,
@@ -32,11 +34,10 @@ from email_utils import (
     get_email_sizes_in_time,
     get_one_email,
     get_one_thread,
-    get_string_email_from_mboxfile,
     get_thread_for_email,
+    load_and_parse_email,
     load_email_content_search,
     load_email_db,
-    parse_email,
 )
 
 if TYPE_CHECKING:
@@ -47,16 +48,37 @@ db_connections: Dict[str, Union["duckdb.DuckDBPyConnection"]] = {}
 EMAILS_PER_PAGE = 5
 
 
-# Cached wrapper functions for stats (cached with LRU, maxsize=128)
-@lru_cache(maxsize=128)
+# Singleton cache for database stats
+# IMPORTANT: These functions have maxsize=1 because they take no parameters.
+# The database is opened in READ-ONLY mode and data can only change when:
+# 1. Server is stopped
+# 2. Mbox is reprocessed and database is updated
+# 3. Server is restarted
+# Therefore, caching the first call's result for the entire server lifetime is correct.
+# The cache will contain exactly 1 entry and never invalidate during runtime.
+@lru_cache(maxsize=1)
 def get_cached_basic_stats() -> List[pd.DataFrame]:
-    """Cached version of get_basic_stats."""
+    """
+    Get basic email statistics (cached for server lifetime).
+
+    This is cached because:
+    - DB is read-only during server runtime
+    - Stats only change when mbox is reprocessed (requires server restart)
+    - First call loads stats, subsequent calls return cached result
+    """
     return get_basic_stats(db_connections["duckdb"])
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=1)
 def get_cached_email_sizes_in_time() -> pd.DataFrame:
-    """Cached version of get_email_sizes_in_time."""
+    """
+    Get email size statistics over time (cached for server lifetime).
+
+    This is cached because:
+    - DB is read-only during server runtime
+    - Stats only change when mbox is reprocessed (requires server restart)
+    - First call loads stats, subsequent calls return cached result
+    """
     return get_email_sizes_in_time(db_connections["duckdb"])
 
 
@@ -112,7 +134,7 @@ def create_list_item_fragment(
 
 
 def create_detail_fragment(
-    email_meta: Dict[str, Union[str, int]],
+    email_meta: Mapping[Any, Any],
     email_content: Optional[str],
     attachments: List[Dict[str, Union[str, bytes, int]]],
     is_in_thread: List[Dict[str, Union[str, int]]],
@@ -143,24 +165,18 @@ def create_thread_detail_fragment(
     """Generates the HTML for the email detail pane."""
     # Parse content for each email in the thread
     enriched_thread = []
-    for email in thread:
-        email_start = email.get("email_start")
-        email_end = email.get("email_end")
-        if isinstance(email_start, int) and isinstance(email_end, int):
-            email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
-            parsed_email = parse_email(email_raw_string)
+    for email_dict in thread:
+        try:
+            email = Email.from_dict(email_dict)
+            parsed_email = load_and_parse_email(email)
             # Enrich the email dict with parsed content
-            enriched_email: Dict[str, Any] = dict(
-                email
-            )  # Create a copy with flexible typing
-            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[
-                1
-            ]  # Get HTML content
+            enriched_email: Dict[str, Any] = dict(email_dict)
+            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[1]
             enriched_email["attachments"] = parsed_email.get("attachments", [])
             enriched_thread.append(enriched_email)
-        else:
-            # If we can't parse, just add the email as-is
-            enriched_thread.append(email)
+        except (KeyError, ValueError) as e:
+            logger.warning(f"Failed to parse email in thread: {e}")
+            enriched_thread.append(email_dict)
 
     email_thread_detail_template = templates.get_template("email_detail_thread.jinja")
     output = email_thread_detail_template.render(
@@ -244,13 +260,11 @@ async def stats_data(query_name: str) -> List[Dict[str, Any]]:
             # Convert date column to ISO format string for JSON serialization if it's datetime
             if pd.api.types.is_datetime64_any_dtype(basic_stats["date"]):
                 basic_stats["date"] = basic_stats["date"].dt.strftime("%Y-%m-%d")
-            result: List[Dict[str, Any]] = basic_stats.to_dict(orient="records")  # type: ignore[assignment]
-            return result
+            return basic_stats.to_dict(orient="records")  # type: ignore[return-value]
     elif query_name == "domains_count":
         domain_stats = get_domains_by_count(db_connections["duckdb"])
         if not domain_stats.empty:
-            result: List[Dict[str, Any]] = domain_stats.to_dict(orient="records")  # type: ignore[assignment]
-            return result
+            return domain_stats.to_dict(orient="records")  # type: ignore[return-value]
     return []
 
 
@@ -368,46 +382,37 @@ async def email_list(
 async def email_detail(email_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
 
-    email_meta_list = get_one_email(db_connections["duckdb"], email_id).to_dict(
-        orient="records"
-    )
-    if isinstance(email_meta_list, list) and email_meta_list:
-        email_meta: Dict[str, Union[str, int]] = email_meta_list[0]  # type: ignore[assignment]
-    else:
+    email_df = get_one_email(db_connections["duckdb"], email_id)
+    if email_df.empty:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
-    if email_meta:
-        email_start = email_meta.get("email_start")
-        email_end = email_meta.get("email_end")
-        if isinstance(email_start, int) and isinstance(email_end, int):
-            email_raw_string = get_string_email_from_mboxfile(email_start, email_end)
-        else:
-            return HTMLResponse(
-                content="<div class='p-8 text-center text-red-400'>Error: Invalid email boundaries.</div>",
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+    try:
+        email_meta = email_df.to_dict(orient="records")[0]
+        email = Email.from_dict(email_meta)
+        parsed_email = load_and_parse_email(email)
 
-        parsed_email = parse_email(email_raw_string)
         attachments = parsed_email.get("attachments")
         email_content = parsed_email.get("body")
         is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
             orient="records"
         )
+
         return HTMLResponse(
             content=create_detail_fragment(
                 email_meta,
-                email_content[1],
-                attachments,
-                is_in_thread,  # type: ignore[index, arg-type]
+                email_content[1] if email_content else None,  # type: ignore[arg-type]
+                attachments,  # type: ignore[arg-type]
+                is_in_thread,  # type: ignore[arg-type]
             )
         )
-    else:
+    except (KeyError, ValueError, IndexError) as e:
+        logger.error(f"Failed to load email {email_id}: {e}")
         return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
-            status_code=status.HTTP_404_NOT_FOUND,
+            content="<div class='p-8 text-center text-red-400'>Error: Failed to load email.</div>",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 

@@ -5,17 +5,9 @@ from email.policy import default
 
 import pytest
 
-from email_utils import (
-    MboxReader,
-    _extract_body_content,
-    get_basic_stats,
-    get_email_count,
-    get_email_sizes_in_time,
-    get_one_email,
-    get_one_thread,
-    parse_email,
-    to_string,
-)
+from email_utils import (MboxReader, _extract_body_content, get_basic_stats,
+                         get_email_count, get_email_sizes_in_time,
+                         get_one_email, get_one_thread, parse_email, to_string)
 
 
 class TestToString:
