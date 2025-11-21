@@ -26,15 +26,12 @@ from fastapi.templating import Jinja2Templates
 
 from email_service import parse_search_query
 from email_utils import (
-    Email,
     get_attachment_file,
     get_basic_stats,
     get_domains_by_count,
     get_email_sizes_in_time,
     get_one_email,
-    get_one_thread,
     get_thread_for_email,
-    load_and_parse_email,
     load_email_content_search,
     load_email_db,
 )
@@ -159,29 +156,25 @@ def create_thread_detail_fragment(
     email_meta: Optional[Dict[str, Union[str, int]]],
     email_content: Optional[str],
     attachments: Optional[List[Dict[str, Union[str, bytes, int]]]],
-    thread: List[Dict[str, Union[str, int]]],
+    enriched_thread: List[Dict[str, Any]],
 ) -> str:
-    """Generates the HTML for the email detail pane."""
-    # Parse content for each email in the thread
-    enriched_thread = []
-    for email_dict in thread:
-        try:
-            email = Email.from_dict(email_dict)
-            parsed_email = load_and_parse_email(email)
-            # Enrich the email dict with parsed content
-            enriched_email: Dict[str, Any] = dict(email_dict)
-            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[1]
-            enriched_email["attachments"] = parsed_email.get("attachments", [])
-            enriched_thread.append(enriched_email)
-        except (KeyError, ValueError) as e:
-            logger.warning(f"Failed to parse email in thread: {e}")
-            enriched_thread.append(email_dict)
+    """
+    Generates the HTML for the thread detail pane.
 
+    Args:
+        email_meta: Unused (kept for backwards compatibility)
+        email_content: Unused (kept for backwards compatibility)
+        attachments: Unused (kept for backwards compatibility)
+        enriched_thread: List of already-enriched email dicts with parsed content
+
+    Returns:
+        HTML string for thread detail view
+    """
     email_thread_detail_template = templates.get_template("email_detail_thread.jinja")
     output = email_thread_detail_template.render(
         thread_emails=enriched_thread,
-        thread_count=len(thread),
-        thread_id=thread[0].get("thread_id") if thread else None,
+        thread_count=len(enriched_thread),
+        thread_id=enriched_thread[0].get("thread_id") if enriched_thread else None,
     )
     return output
 
@@ -330,20 +323,22 @@ async def email_detail(email_id: str) -> HTMLResponse:
 @app.get("/api/email_thread/{thread_id}", response_class=HTMLResponse)
 async def email_thread_detail(thread_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
+    from email_service import get_thread_with_emails
 
-    thread_meta = get_one_thread(db_connections["duckdb"], thread_id).to_dict(
-        orient="records"
+    # Use service layer to get enriched thread emails
+    enriched_thread = get_thread_with_emails(
+        db=db_connections["duckdb"], thread_id=thread_id
     )
 
-    if thread_meta:
+    if enriched_thread is None:
         return HTMLResponse(
-            content=create_thread_detail_fragment(None, None, None, thread_meta)  # type: ignore[arg-type]
-        )
-    else:
-        return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
+            content="<div class='p-8 text-center text-red-400'>Error: Thread not found.</div>",
             status_code=status.HTTP_404_NOT_FOUND,
         )
+
+    return HTMLResponse(
+        content=create_thread_detail_fragment(None, None, None, enriched_thread)
+    )
 
 
 @app.get("/api/attachment/{email_id:path}/{attachment_id}", response_class=Response)
