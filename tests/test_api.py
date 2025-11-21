@@ -160,33 +160,44 @@ class TestEmailEndpoints:
 
     def test_email_thread_endpoint(self, client):
         """Test email thread endpoint."""
-        mock_thread = pd.DataFrame(
+        mock_enriched_thread = [
             {
-                "message_id": ["<test1@example.com>", "<test2@example.com>"],
-                "subject": ["Re: Test", "Re: Test"],
-                "from_email": ["sender1@example.com", "sender2@example.com"],
-                "to_email": ["recipient@example.com", "recipient@example.com"],
-                "date": ["2024-01-01 12:00:00", "2024-01-01 13:00:00"],
-                "thread_id": ["thread1", "thread1"],
-                "has_attachment": [0, 0],
-                "email_start": [0, 100],
-                "email_end": [100, 200],
-                "excerpt": ["Test1", "Test2"],
-                "labels": [[], []],
-            }
-        )
+                "message_id": "<test1@example.com>",
+                "subject": "Re: Test",
+                "from_email": "sender1@example.com",
+                "to_email": "recipient@example.com",
+                "date": "2024-01-01 12:00:00",
+                "thread_id": "thread1",
+                "has_attachment": 0,
+                "email_start": 0,
+                "email_end": 100,
+                "excerpt": "Test1",
+                "labels": [],
+                "parsed_body": "<p>Test email body</p>",
+                "attachments": [],
+            },
+            {
+                "message_id": "<test2@example.com>",
+                "subject": "Re: Test",
+                "from_email": "sender2@example.com",
+                "to_email": "recipient@example.com",
+                "date": "2024-01-01 13:00:00",
+                "thread_id": "thread1",
+                "has_attachment": 0,
+                "email_start": 100,
+                "email_end": 200,
+                "excerpt": "Test2",
+                "labels": [],
+                "parsed_body": "<p>Test email body</p>",
+                "attachments": [],
+            },
+        ]
 
-        mock_parsed_email = {
-            "body": ("text/html", "<p>Test email body</p>"),
-            "attachments": [],
-        }
-
-        with patch("email_server.get_one_thread", return_value=mock_thread):
-            with patch(
-                "email_server.load_and_parse_email", return_value=mock_parsed_email
-            ):
-                response = client.get("/api/email_thread/thread1")
-                assert response.status_code == 200
+        with patch(
+            "email_service.get_thread_with_emails", return_value=mock_enriched_thread
+        ):
+            response = client.get("/api/email_thread/thread1")
+            assert response.status_code == 200
 
 
 class TestSearchEndpoint:

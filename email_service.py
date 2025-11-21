@@ -18,6 +18,7 @@ Design Principles:
 """
 
 import logging
+from collections.abc import Mapping, Sequence
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -227,7 +228,33 @@ def get_email_with_thread(db: Any, email_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def enrich_thread_emails(db: Any, thread: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def get_thread_with_emails(db: Any, thread_id: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    Get thread emails and enrich them with parsed content.
+
+    Args:
+        db: Database connection
+        thread_id: Thread ID
+
+    Returns:
+        List of enriched email dicts with parsed content, or None if thread not found
+    """
+    from email_utils import get_one_thread
+
+    # Get thread from database
+    thread_df = get_one_thread(db, thread_id)
+    thread = thread_df.to_dict(orient="records")
+
+    if not thread:
+        return None
+
+    # Enrich emails in thread
+    return enrich_thread_emails(db, thread)
+
+
+def enrich_thread_emails(
+    db: Any, thread: Sequence[Mapping[Any, Any]]
+) -> List[Dict[str, Any]]:
     """
     Enrich thread emails with parsed content.
 
@@ -242,7 +269,28 @@ def enrich_thread_emails(db: Any, thread: List[Dict[str, Any]]) -> List[Dict[str
     Returns:
         List of enriched email dicts with parsed content
     """
-    raise NotImplementedError("To be implemented in Phase 5")
+    from email_utils import Email, load_and_parse_email
+
+    enriched_thread = []
+    for email_dict in thread:
+        try:
+            # Convert to Email dataclass and parse
+            email = Email.from_dict(email_dict)
+            parsed_email = load_and_parse_email(email)
+
+            # Enrich the email dict with parsed content
+            enriched_email: Dict[str, Any] = dict(email_dict)
+            enriched_email["parsed_body"] = parsed_email.get("body", ("", ""))[
+                1
+            ]  # Get HTML content
+            enriched_email["attachments"] = parsed_email.get("attachments", [])
+            enriched_thread.append(enriched_email)
+        except (KeyError, ValueError) as e:
+            logger.warning(f"Failed to parse email in thread: {e}")
+            # Add original email dict if parsing fails (convert to dict)
+            enriched_thread.append(dict(email_dict))
+
+    return enriched_thread
 
 
 def get_stats_summary(db: Any) -> Dict[str, Any]:
