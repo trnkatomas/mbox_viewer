@@ -2,9 +2,8 @@ import datetime
 import logging
 import re
 import time
-from contextlib import asynccontextmanager
-from functools import lru_cache
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -27,9 +26,6 @@ from fastapi.templating import Jinja2Templates
 from email_service import parse_search_query
 from email_utils import (
     get_attachment_file,
-    get_basic_stats,
-    get_domains_by_count,
-    get_email_sizes_in_time,
     get_one_email,
     get_thread_for_email,
     load_email_content_search,
@@ -42,40 +38,6 @@ if TYPE_CHECKING:
 db_connections: Dict[str, Union["duckdb.DuckDBPyConnection"]] = {}
 
 EMAILS_PER_PAGE = 5
-
-
-# Singleton cache for database stats
-# IMPORTANT: These functions have maxsize=1 because they take no parameters.
-# The database is opened in READ-ONLY mode and data can only change when:
-# 1. Server is stopped
-# 2. Mbox is reprocessed and database is updated
-# 3. Server is restarted
-# Therefore, caching the first call's result for the entire server lifetime is correct.
-# The cache will contain exactly 1 entry and never invalidate during runtime.
-@lru_cache(maxsize=1)
-def get_cached_basic_stats() -> List[pd.DataFrame]:
-    """
-    Get basic email statistics (cached for server lifetime).
-
-    This is cached because:
-    - DB is read-only during server runtime
-    - Stats only change when mbox is reprocessed (requires server restart)
-    - First call loads stats, subsequent calls return cached result
-    """
-    return get_basic_stats(db_connections["duckdb"])
-
-
-@lru_cache(maxsize=1)
-def get_cached_email_sizes_in_time() -> pd.DataFrame:
-    """
-    Get email size statistics over time (cached for server lifetime).
-
-    This is cached because:
-    - DB is read-only during server runtime
-    - Stats only change when mbox is reprocessed (requires server restart)
-    - First call loads stats, subsequent calls return cached result
-    """
-    return get_email_sizes_in_time(db_connections["duckdb"])
 
 
 @asynccontextmanager
@@ -190,42 +152,29 @@ async def index(request: Request) -> HTMLResponse:
 @app.get("/api/stats/layout", response_class=HTMLResponse)
 async def stats_layout(request: Request) -> HTMLResponse:
     """Route to serve the base HTML template."""
+    from email_service import get_stats_summary
+
     stats_template = templates.get_template("stats.jinja")
 
-    basic_stats = get_cached_basic_stats()
-    all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails")
-    avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size")
-    first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
-    last_seen = basic_stats[2].to_dict(orient="records")[0].get("last_seen")
-
-    days_timespan = 0
-    if first_seen is not None and last_seen is not None:
-        days_timespan = (last_seen - first_seen).days / 365
+    # Use service layer to get stats summary
+    stats = get_stats_summary(db_connections["duckdb"])
 
     return HTMLResponse(
         content=stats_template.render(
-            all_emails=all_emails,
-            days_timespan=days_timespan,
-            avg_size=avg_size,
+            all_emails=stats["all_emails"],
+            days_timespan=stats["days_timespan"],
+            avg_size=stats["avg_size"],
         )
     )
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
 async def stats_data(query_name: str) -> List[Dict[str, Any]]:
-    """Route to serve the base HTML template."""
-    if query_name == "dates_size":
-        basic_stats = get_cached_email_sizes_in_time()
-        if not basic_stats.empty:
-            # Convert date column to ISO format string for JSON serialization if it's datetime
-            if pd.api.types.is_datetime64_any_dtype(basic_stats["date"]):
-                basic_stats["date"] = basic_stats["date"].dt.strftime("%Y-%m-%d")
-            return basic_stats.to_dict(orient="records")  # type: ignore[return-value]
-    elif query_name == "domains_count":
-        domain_stats = get_domains_by_count(db_connections["duckdb"])
-        if not domain_stats.empty:
-            return domain_stats.to_dict(orient="records")  # type: ignore[return-value]
-    return []
+    """Route to serve stats time series data."""
+    from email_service import get_stats_time_series
+
+    # Use service layer to get time series data
+    return get_stats_time_series(db_connections["duckdb"], query_name)
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
