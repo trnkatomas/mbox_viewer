@@ -113,7 +113,70 @@ def search_emails(
         - total_count: Total matching emails
         - has_more: Boolean indicating more results available
     """
-    raise NotImplementedError("To be implemented in Phase 3")
+    from email_utils import get_email_count, get_email_list, rag_search_duckdb
+
+    # Calculate pagination indices
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+
+    # Parse search query if provided
+    additional_criteria = parse_search_query(query) if query else None
+
+    # Handle RAG semantic search if rag: query provided
+    rag_message_ids: Optional[pd.DataFrame] = None
+    if additional_criteria and "rag" in additional_criteria:
+        rag_query = additional_criteria.pop(
+            "rag"
+        )  # Remove from criteria, handle separately
+        rag_message_ids = rag_search_duckdb(
+            db,
+            rag_query,
+            n_results=100,  # Get more RAG results, then filter/paginate
+        )
+
+    # Fetch emails from database
+    page_emails_df = get_email_list(
+        db,
+        criteria=(
+            {"limit": page_size, "offset": start_index}
+            if rag_message_ids is None
+            else {"limit": page_size, "offset": 0}
+        ),
+        additional_criteria=additional_criteria,
+        sent=folder == "Sent",
+        rag_message_ids=(
+            rag_message_ids[start_index:end_index]["message_id"].tolist()
+            if rag_message_ids is not None and not rag_message_ids.empty
+            else None
+        ),
+    )
+
+    # Merge RAG results if needed
+    if rag_message_ids is not None and not rag_message_ids.empty:
+        page_emails_df = pd.merge(
+            page_emails_df, rag_message_ids[["message_id", "dist"]], on="message_id"
+        ).sort_values(by="dist", ascending=True)
+
+    # Convert to list of dicts
+    page_emails = page_emails_df.to_dict(orient="records")
+
+    # Calculate total count
+    if rag_message_ids is not None and not rag_message_ids.empty:
+        total_count = rag_message_ids.shape[0]
+    elif additional_criteria:
+        total_count = get_email_count(db, additional_criteria)
+    else:
+        total_count = get_email_count(db)
+
+    # Calculate if there are more results
+    has_more = end_index < total_count
+
+    return {
+        "emails": page_emails,
+        "total_count": total_count,
+        "has_more": has_more,
+        "next_page": page + 1 if has_more else -1,
+    }
 
 
 def get_email_with_thread(db: Any, email_id: str) -> Optional[Dict[str, Any]]:
