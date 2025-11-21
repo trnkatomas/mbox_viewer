@@ -44,15 +44,13 @@ class TestMainEndpoints:
 
     def test_inbox_layout(self, client):
         """Test inbox layout endpoint."""
-        with patch("email_server.get_email_count", return_value=10):
-            response = client.get("/api/inbox/layout")
-            assert response.status_code == 200
+        response = client.get("/api/inbox/layout")
+        assert response.status_code == 200
 
     def test_sent_layout(self, client):
         """Test sent folder layout endpoint."""
-        with patch("email_server.get_email_count", return_value=5):
-            response = client.get("/api/sent/layout")
-            assert response.status_code == 200
+        response = client.get("/api/sent/layout")
+        assert response.status_code == 200
 
     def test_stats_layout(self, client):
         """Test statistics layout endpoint."""
@@ -79,39 +77,55 @@ class TestEmailEndpoints:
 
     def test_email_list_endpoint(self, client):
         """Test email list endpoint."""
-        mock_emails = pd.DataFrame(
-            {
-                "message_id": ["<test1@example.com>", "<test2@example.com>"],
-                "subject": ["Test 1", "Test 2"],
-                "from_email": ["sender1@example.com", "sender2@example.com"],
-                "date": ["2024-01-01", "2024-01-02"],
-                "excerpt": ["Body 1", "Body 2"],
-                "has_attachment": [False, True],
-            }
-        )
+        mock_result = {
+            "emails": [
+                {
+                    "message_id": "<test1@example.com>",
+                    "subject": "Test 1",
+                    "from_email": "sender1@example.com",
+                    "date": "2024-01-01",
+                    "excerpt": "Body 1",
+                    "has_attachment": False,
+                },
+                {
+                    "message_id": "<test2@example.com>",
+                    "subject": "Test 2",
+                    "from_email": "sender2@example.com",
+                    "date": "2024-01-02",
+                    "excerpt": "Body 2",
+                    "has_attachment": True,
+                },
+            ],
+            "total_count": 10,
+            "has_more": True,
+            "next_page": 2,
+        }
 
-        with patch("email_server.get_email_list", return_value=mock_emails):
-            with patch("email_server.get_email_count", return_value=10):
-                response = client.get("/api/email/list?page=1")
-                assert response.status_code == 200
+        with patch("email_service.search_emails", return_value=mock_result):
+            response = client.get("/api/email/list?page=1")
+            assert response.status_code == 200
 
     def test_email_list_with_search(self, client):
         """Test email list with search query."""
-        mock_emails = pd.DataFrame(
-            {
-                "message_id": ["<test1@example.com>"],
-                "subject": ["Test Email"],
-                "from_email": ["sender@example.com"],
-                "date": ["2024-01-01"],
-                "excerpt": ["Body"],
-                "has_attachment": [False],
-            }
-        )
+        mock_result = {
+            "emails": [
+                {
+                    "message_id": "<test1@example.com>",
+                    "subject": "Test Email",
+                    "from_email": "sender@example.com",
+                    "date": "2024-01-01",
+                    "excerpt": "Body",
+                    "has_attachment": False,
+                }
+            ],
+            "total_count": 10,
+            "has_more": True,
+            "next_page": 2,
+        }
 
-        with patch("email_server.get_email_list", return_value=mock_emails):
-            with patch("email_server.get_email_count", return_value=10):
-                response = client.get("/api/email/list?page=1&query=test")
-                assert response.status_code == 200
+        with patch("email_service.search_emails", return_value=mock_result):
+            response = client.get("/api/email/list?page=1&query=test")
+            assert response.status_code == 200
 
     def test_email_detail_endpoint(self, client):
         """Test single email detail endpoint."""
@@ -189,30 +203,38 @@ class TestSearchEndpoint:
 
     def test_search_basic(self, client):
         """Test basic search."""
-        mock_results = pd.DataFrame(
-            {
-                "message_id": ["<test1@example.com>"],
-                "subject": ["Test Email"],
-                "from_email": ["sender@example.com"],
-                "date": ["2024-01-01"],
-                "excerpt": ["Body"],
-                "has_attachment": [False],
-            }
-        )
+        mock_result = {
+            "emails": [
+                {
+                    "message_id": "<test1@example.com>",
+                    "subject": "Test Email",
+                    "from_email": "sender@example.com",
+                    "date": "2024-01-01",
+                    "excerpt": "Body",
+                    "has_attachment": False,
+                }
+            ],
+            "total_count": 10,
+            "has_more": True,
+            "next_page": 2,
+        }
 
-        with patch("email_server.get_email_list", return_value=mock_results):
-            with patch("email_server.get_email_count", return_value=10):
-                response = client.post(
-                    "/api/search", data={"search_input": "test query"}
-                )
-                assert response.status_code == 200
+        with patch("email_service.search_emails", return_value=mock_result):
+            response = client.post("/api/search", data={"search_input": "test query"})
+            assert response.status_code == 200
 
     def test_search_empty_query(self, client):
         """Test search with empty query."""
-        with patch("email_server.get_email_list", return_value=pd.DataFrame()):
-            with patch("email_server.get_email_count", return_value=0):
-                response = client.post("/api/search", data={"search_input": ""})
-                assert response.status_code == 200
+        mock_result = {
+            "emails": [],
+            "total_count": 0,
+            "has_more": False,
+            "next_page": -1,
+        }
+
+        with patch("email_service.search_emails", return_value=mock_result):
+            response = client.post("/api/search", data={"search_input": ""})
+            assert response.status_code == 200
 
 
 class TestStatsEndpoint:
