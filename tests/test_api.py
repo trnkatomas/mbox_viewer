@@ -56,18 +56,15 @@ class TestMainEndpoints:
         """Test statistics layout endpoint."""
         import datetime
 
-        mock_stats = [
-            pd.DataFrame({"all_emails": [100]}),
-            pd.DataFrame({"avg_size": [5000]}),
-            pd.DataFrame(
-                {
-                    "first_seen": [datetime.datetime(2024, 1, 1)],
-                    "last_seen": [datetime.datetime(2024, 12, 31)],
-                }
-            ),
-        ]
+        mock_stats_summary = {
+            "all_emails": 100,
+            "avg_size": 5000,
+            "days_timespan": 1.0,
+            "first_seen": datetime.datetime(2024, 1, 1),
+            "last_seen": datetime.datetime(2024, 12, 31),
+        }
 
-        with patch("email_server.get_basic_stats", return_value=mock_stats):
+        with patch("email_service.get_stats_summary", return_value=mock_stats_summary):
             response = client.get("/api/stats/layout")
             assert response.status_code == 200
 
@@ -252,11 +249,12 @@ class TestStatsEndpoint:
 
     def test_stats_email_sizes(self, client):
         """Test email sizes over time endpoint."""
-        mock_sizes = pd.DataFrame(
-            {"date": ["2024-01-01", "2024-02-01"], "count": [1000, 1500]}
-        )
+        mock_data = [
+            {"date": "2024-01-01", "count": 1000},
+            {"date": "2024-02-01", "count": 1500},
+        ]
 
-        with patch("email_server.get_email_sizes_in_time", return_value=mock_sizes):
+        with patch("email_service.get_stats_time_series", return_value=mock_data):
             response = client.get("/api/stats/data/dates_size")
             assert response.status_code == 200
             data = response.json()

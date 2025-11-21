@@ -19,6 +19,7 @@ Design Principles:
 
 import logging
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -310,4 +311,50 @@ def get_stats_summary(db: Any) -> Dict[str, Any]:
         - first_seen: First email date
         - last_seen: Last email date
     """
-    raise NotImplementedError("To be implemented in Phase 6")
+    from email_utils import get_basic_stats
+
+    basic_stats = get_basic_stats(db)
+    all_emails = basic_stats[0].to_dict(orient="records")[0].get("all_emails")
+    avg_size = basic_stats[1].to_dict(orient="records")[0].get("avg_size")
+    first_seen = basic_stats[2].to_dict(orient="records")[0].get("first_seen")
+    last_seen = basic_stats[2].to_dict(orient="records")[0].get("last_seen")
+
+    days_timespan = 0
+    if first_seen is not None and last_seen is not None:
+        days_timespan = (last_seen - first_seen).days / 365
+
+    return {
+        "all_emails": all_emails,
+        "avg_size": avg_size,
+        "days_timespan": days_timespan,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+    }
+
+
+def get_stats_time_series(db: Any, query_name: str) -> List[Dict[str, Any]]:
+    """
+    Get time series statistics data.
+
+    Args:
+        db: Database connection
+        query_name: Type of stats query (dates_size, domains_count)
+
+    Returns:
+        List of dicts containing time series data, or empty list if query not supported
+    """
+    from email_utils import get_domains_by_count, get_email_sizes_in_time
+
+    if query_name == "dates_size":
+        stats_df = get_email_sizes_in_time(db)
+        if not stats_df.empty:
+            # Convert date column to ISO format string for JSON serialization if it's datetime
+            if pd.api.types.is_datetime64_any_dtype(stats_df["date"]):
+                stats_df["date"] = stats_df["date"].dt.strftime("%Y-%m-%d")
+            return stats_df.to_dict(orient="records")  # type: ignore[return-value]
+    elif query_name == "domains_count":
+        stats_df = get_domains_by_count(db)
+        if not stats_df.empty:
+            return stats_df.to_dict(orient="records")  # type: ignore[return-value]
+
+    return []
