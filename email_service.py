@@ -189,12 +189,42 @@ def get_email_with_thread(db: Any, email_id: str) -> Optional[Dict[str, Any]]:
 
     Returns:
         Dictionary containing:
-        - email: Email metadata and content
-        - thread: List of emails in the same thread
+        - email_meta: Email metadata dict
+        - email_content: Parsed email content (HTML)
         - attachments: List of attachments
+        - thread: List of emails in the same thread
         Or None if email not found
     """
-    raise NotImplementedError("To be implemented in Phase 4")
+    from email_utils import Email, get_one_email, get_thread_for_email, load_and_parse_email
+
+    # Get email from database
+    email_df = get_one_email(db, email_id)
+    if email_df.empty:
+        return None
+
+    try:
+        # Convert to dict and Email dataclass
+        email_meta = email_df.to_dict(orient="records")[0]
+        email = Email.from_dict(email_meta)
+
+        # Load and parse email content
+        parsed_email = load_and_parse_email(email)
+        attachments = parsed_email.get("attachments")
+        email_content = parsed_email.get("body")
+
+        # Get thread information
+        thread_df = get_thread_for_email(db, email_id)
+        thread = thread_df.to_dict(orient="records")
+
+        return {
+            "email_meta": email_meta,
+            "email_content": email_content[1] if email_content else None,  # Get HTML content
+            "attachments": attachments,
+            "thread": thread,
+        }
+    except (KeyError, ValueError, IndexError) as e:
+        logger.error(f"Failed to load email {email_id}: {e}")
+        return None
 
 
 def enrich_thread_emails(db: Any, thread: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

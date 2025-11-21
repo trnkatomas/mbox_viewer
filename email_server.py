@@ -306,39 +306,25 @@ async def email_list(
 @app.get("/api/email/{email_id:path}", response_class=HTMLResponse)
 async def email_detail(email_id: str) -> HTMLResponse:
     """HTMX route to load the detail pane content."""
+    from email_service import get_email_with_thread
 
-    email_df = get_one_email(db_connections["duckdb"], email_id)
-    if email_df.empty:
+    # Use service layer to get email details
+    result = get_email_with_thread(db=db_connections["duckdb"], email_id=email_id)
+
+    if result is None:
         return HTMLResponse(
             content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
-    try:
-        email_meta = email_df.to_dict(orient="records")[0]
-        email = Email.from_dict(email_meta)
-        parsed_email = load_and_parse_email(email)
-
-        attachments = parsed_email.get("attachments")
-        email_content = parsed_email.get("body")
-        is_in_thread = get_thread_for_email(db_connections["duckdb"], email_id).to_dict(
-            orient="records"
+    return HTMLResponse(
+        content=create_detail_fragment(
+            result["email_meta"],
+            result["email_content"],
+            result["attachments"],
+            result["thread"],
         )
-
-        return HTMLResponse(
-            content=create_detail_fragment(
-                email_meta,
-                email_content[1] if email_content else None,  # type: ignore[arg-type]
-                attachments,  # type: ignore[arg-type]
-                is_in_thread,  # type: ignore[arg-type]
-            )
-        )
-    except (KeyError, ValueError, IndexError) as e:
-        logger.error(f"Failed to load email {email_id}: {e}")
-        return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Failed to load email.</div>",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+    )
 
 
 @app.get("/api/email_thread/{thread_id}", response_class=HTMLResponse)
