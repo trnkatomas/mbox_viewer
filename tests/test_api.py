@@ -129,43 +129,34 @@ class TestEmailEndpoints:
 
     def test_email_detail_endpoint(self, client):
         """Test single email detail endpoint."""
-        mock_email = pd.DataFrame(
-            {
-                "message_id": ["<test1@example.com>"],
-                "subject": ["Test Email"],
-                "from_email": ["sender@example.com"],
-                "to_email": ["recipient@example.com"],
-                "date": ["2024-01-01 12:00:00"],
-                "has_attachment": [0],
-                "email_start": [0],
-                "email_end": [100],
-                "thread_id": ["thread1"],
-                "excerpt": ["Test excerpt"],
-                "labels": [[]],
-            }
-        )
-
-        mock_parsed_email = {
-            "body": ("Plain Text", "This is the email body"),
+        mock_result = {
+            "email_meta": {
+                "message_id": "<test1@example.com>",
+                "subject": "Test Email",
+                "from_email": "sender@example.com",
+                "to_email": "recipient@example.com",
+                "date": "2024-01-01 12:00:00",
+                "has_attachment": 0,
+                "email_start": 0,
+                "email_end": 100,
+                "thread_id": "thread1",
+                "excerpt": "Test excerpt",
+                "labels": [],
+            },
+            "email_content": "This is the email body",
             "attachments": [],
+            "thread": [],
         }
 
-        with patch("email_server.get_one_email", return_value=mock_email):
-            with patch(
-                "email_server.load_and_parse_email", return_value=mock_parsed_email
-            ):
-                with patch(
-                    "email_server.get_thread_for_email", return_value=pd.DataFrame()
-                ):
-                    response = client.get("/api/email/<test1@example.com>")
-                    assert response.status_code == 200
+        with patch("email_service.get_email_with_thread", return_value=mock_result):
+            response = client.get("/api/email/<test1@example.com>")
+            assert response.status_code == 200
 
     def test_email_detail_not_found(self, client):
         """Test email detail with non-existent email."""
-        with patch("email_server.get_one_email", return_value=pd.DataFrame()):
+        with patch("email_service.get_email_with_thread", return_value=None):
             response = client.get("/api/email/<nonexistent@example.com>")
-            # Should handle gracefully - may return 200 with empty content or 404
-            assert response.status_code in [200, 404]
+            assert response.status_code == 404
 
     def test_email_thread_endpoint(self, client):
         """Test email thread endpoint."""
