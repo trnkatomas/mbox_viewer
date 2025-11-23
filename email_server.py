@@ -25,7 +25,6 @@ from fastapi.templating import Jinja2Templates
 
 from email_service import parse_search_query
 from email_utils import (
-    get_attachment_file,
     get_one_email,
     get_thread_for_email,
     load_email_content_search,
@@ -291,10 +290,12 @@ async def email_thread_detail(thread_id: str) -> HTMLResponse:
 
 
 @app.get("/api/attachment/{email_id:path}/{attachment_id}", response_class=Response)
-async def get_attachment(email_id: str, attachment_id: str) -> Response:
-    """HTMX route to load the detail pane content."""
+async def get_attachment_route(email_id: str, attachment_id: str) -> Response:
+    """Route to download email attachment."""
+    from email_service import get_attachment
 
-    attachment = get_attachment_file(db_connections["duckdb"], email_id, attachment_id)
+    # Use service layer to get attachment
+    attachment = get_attachment(db_connections["duckdb"], email_id, attachment_id)
 
     if not attachment or "content" not in attachment:
         return Response(

@@ -18,13 +18,21 @@ Design Principles:
 """
 
 import logging
+import mmap
+import os
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Mbox file path - imported from environment
+MBOX_FILE_PATH = os.getenv(
+    "MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox"
+)
 
 
 # ============================================================================
@@ -358,3 +366,126 @@ def get_stats_time_series(db: Any, query_name: str) -> List[Dict[str, Any]]:
             return stats_df.to_dict(orient="records")  # type: ignore[return-value]
 
     return []
+
+
+# ============================================================================
+# Mbox File Access with mmap (Thread-Safe, Efficient for Large Files)
+# ============================================================================
+
+
+@lru_cache(maxsize=512)
+def read_mbox_slice(start: int, end: int) -> bytes:
+    """
+    Read a slice from the mbox file using memory-mapped I/O.
+
+    This function uses mmap for efficient random access to large mbox files,
+    which is ideal for read-only operations. Results are cached to avoid
+    repeated reads of the same email.
+
+    Args:
+        start: Start byte position
+        end: End byte position
+
+    Returns:
+        Byte slice from the mbox file
+
+    Note:
+        mmap is thread-safe for read operations and more efficient than
+        seek/read for random access patterns, especially with large files.
+    """
+    with open(MBOX_FILE_PATH, "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            return mm[start:end]
+
+
+def read_mbox_slices_concurrent(
+    regions: List[Tuple[int, int]], max_workers: int = 5
+) -> List[bytes]:
+    """
+    Read multiple regions from mbox file concurrently using mmap.
+
+    Useful for loading multiple emails or attachments in parallel.
+
+    Args:
+        regions: List of (start, end) byte position tuples
+        max_workers: Maximum number of concurrent threads
+
+    Returns:
+        List of byte slices corresponding to each region
+
+    Example:
+        >>> regions = [(100, 200), (10_000, 11_000), (1_000_000, 1_010_000)]
+        >>> results = read_mbox_slices_concurrent(regions)
+    """
+    with open(MBOX_FILE_PATH, "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(
+                    executor.map(lambda region: mm[region[0] : region[1]], regions)
+                )
+            return results
+
+
+def get_attachment(
+    db: Any, email_id: str, attachment_id: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Get email attachment with validation.
+
+    Retrieves attachment content from the mbox file using efficient
+    memory-mapped I/O.
+
+    Args:
+        db: Database connection
+        email_id: Email message ID
+        attachment_id: Attachment filename
+
+    Returns:
+        Dictionary containing:
+        - filename: Attachment filename
+        - content: Binary content
+        - content_type: MIME type
+        - size_bytes: Size in bytes
+        Or None if attachment not found
+    """
+    from email_utils import get_one_email, parse_email
+
+    # Get email metadata from database
+    email_df = get_one_email(db, email_id)
+    if email_df.empty:
+        logger.warning(f"Email {email_id} not found")
+        return None
+
+    try:
+        email_data = email_df.to_dict(orient="records")[0]
+
+        # Read email content from mbox using mmap
+        email_start = email_data.get("email_start")
+        email_end = email_data.get("email_end")
+
+        if email_start is None or email_end is None:
+            logger.error(f"Email {email_id} missing byte positions")
+            return None
+
+        email_raw = read_mbox_slice(email_start, email_end)
+
+        # Parse email and extract attachments
+        parsed = parse_email(email_raw)
+        attachments = parsed.get("attachments", [])
+
+        # Type narrowing: ensure attachments is a list
+        if not isinstance(attachments, list):
+            logger.error(f"Invalid attachments format for email {email_id}")
+            return None
+
+        # Find the requested attachment
+        for attachment in attachments:
+            if isinstance(attachment, dict) and attachment.get("filename") == attachment_id:
+                return attachment
+
+        logger.warning(f"Attachment {attachment_id} not found in email {email_id}")
+        return None
+
+    except (KeyError, ValueError, IndexError) as e:
+        logger.error(f"Failed to retrieve attachment {attachment_id}: {e}")
+        return None

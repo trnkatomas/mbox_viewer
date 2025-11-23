@@ -279,7 +279,7 @@ class TestAttachmentEndpoint:
             "content_type": "application/pdf",
         }
 
-        with patch("email_server.get_attachment_file", return_value=mock_attachment):
+        with patch("email_service.get_attachment", return_value=mock_attachment):
             response = client.get("/api/attachment/<test1@example.com>/test.pdf")
             assert response.status_code == 200
             assert response.headers["content-type"] == "application/pdf"
@@ -287,6 +287,6 @@ class TestAttachmentEndpoint:
 
     def test_attachment_not_found(self, client):
         """Test downloading non-existent attachment."""
-        with patch("email_server.get_attachment_file", return_value={}):
+        with patch("email_service.get_attachment", return_value=None):
             response = client.get("/api/attachment/<test1@example.com>/nonexistent.pdf")
             assert response.status_code == 404
