@@ -68,10 +68,9 @@ class Email:
         )
 
 
-# Default MBOX file path - can be overridden with MBOX_FILE_PATH environment variable
-mboxfilename = os.getenv(
-    "MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox"
-)
+# MBOX file path - must be set via MBOX_FILE_PATH environment variable
+# Set to None if not provided; functions using this will fail with clear error messages
+mboxfilename = os.getenv("MBOX_FILE_PATH")
 
 
 class MboxReader:
@@ -416,6 +415,10 @@ def load_and_parse_email(
 
 @lru_cache(maxsize=512)
 def get_string_email_from_mboxfile(email_start: int, email_end: int) -> bytes:
+    if mboxfilename is None:
+        raise ValueError(
+            "MBOX_FILE_PATH environment variable must be set to use this function"
+        )
     with open(mboxfilename, "rb") as infile:
         infile.seek(email_start)
         data = infile.read(email_end - email_start)
@@ -650,6 +653,11 @@ def rag_search_duckdb(
 
 
 def process(drop_previous_table: bool = False) -> None:
+    if mboxfilename is None:
+        raise ValueError(
+            "MBOX_FILE_PATH environment variable must be set to use this function"
+        )
+
     # imports
     from hashlib import sha256
 
@@ -674,7 +682,7 @@ def process(drop_previous_table: bool = False) -> None:
                 break
             sha.update(data)
     mbox_file_hash = sha.hexdigest()
-    print("SHA256: {0}".format(mbox_file_hash))
+    logger.info("SHA256: %s", mbox_file_hash)
 
     con = duckdb.connect("emails.db")
     if drop_previous_table:
@@ -731,10 +739,11 @@ def process(drop_previous_table: bool = False) -> None:
                     ids=[message["Message-ID"]], documents=[whole_text]
                 )
                 # the content should be chunked into ~ 500 tokens
+                # Use None to let function read from environment variables
                 d_encoded = get_ollama_embedding(
                     document_prefix + whole_text,
-                    "http://localhost:11434/api/embed",
-                    "embeddinggemma",
+                    None,  # Uses OLLAMA_URL env var
+                    None,  # Uses OLLAMA_MODEL env var
                 )
                 vector_to_insert = [message["Message-ID"], mbox_file_hash, d_encoded]
                 con.execute(
