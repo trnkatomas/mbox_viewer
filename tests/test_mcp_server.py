@@ -1,6 +1,7 @@
 """Tests for MCP server tools in mcp_server.py."""
 
 import json
+from typing import Union
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,8 +12,9 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _load_json(result: str) -> dict | list:
-    return json.loads(result)
+def _load_json(result: str) -> Union[dict, list]:
+    parsed: Union[dict, list] = json.loads(result)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
