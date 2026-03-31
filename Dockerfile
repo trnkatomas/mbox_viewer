@@ -43,35 +43,37 @@ RUN npx tailwindcss -i src/input.css -o static/output.css --minify
 # ----------------------------------------------------------------------
 # 2. Final Stage (For Python/FastAPI Application)
 # ----------------------------------------------------------------------
-# We use a slim Python image for the final, lean production environment
 FROM python:3.11-slim-bookworm AS final
 
-# Set environment variable
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Install FastAPI and Uvicorn with standard dependencies (which includes Jinja2)
-RUN pip install "fastapi[standard]" uvicorn
+# Create a non-root user and group (uid/gid 1000)
+RUN groupadd --gid 1000 appgroup && \
+    useradd --uid 1000 --gid appgroup --no-create-home --shell /sbin/nologin appuser
 
-# Set the working directory for the application
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# Copy the server code
-COPY server.py .
+# Install dependencies as root before dropping privileges
+COPY pyproject.toml .
+RUN pip install --no-cache-dir uv && \
+    uv pip install --system --no-cache -r pyproject.toml
 
-# Create the templates directory and copy the base HTML
-RUN mkdir -p templates
-# Use the *real* index.html for serving
-COPY index.html templates/index.html
+# Copy application code
+COPY email_server.py email_service.py email_utils.py mcp_server.py ./
+COPY templates/ templates/
+COPY static/ static/
 
-# Copy the *built* frontend assets from the builder stage
-# This copies the actual generated static/ directory containing output.css and bundle.js
+# Copy the built frontend assets from the builder stage
 COPY --from=builder /app/static/ static/
 
-# Expose the port Uvicorn will run on
+# Hand ownership of the working directory to the app user
+# (the mbox file and db are mounted as volumes and must be pre-chowned on the host)
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
 EXPOSE 8000
 
-# Command to run the application using Uvicorn
-# 'server:app' refers to the 'app' object in the 'server.py' file
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "email_server:app", "--host", "0.0.0.0", "--port", "8000"]
 
