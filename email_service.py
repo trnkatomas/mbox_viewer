@@ -29,10 +29,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Mbox file path - imported from environment
-MBOX_FILE_PATH = os.getenv(
-    "MBOX_FILE_PATH", "/Users/tomastrnka/Downloads/bigger_example.mbox"
-)
+# Mbox file path - must be set via MBOX_FILE_PATH environment variable
+# Set to None if not provided; functions using this will fail with clear error messages
+MBOX_FILE_PATH = os.getenv("MBOX_FILE_PATH")
 
 
 # ============================================================================
@@ -393,6 +392,10 @@ def read_mbox_slice(start: int, end: int) -> bytes:
         mmap is thread-safe for read operations and more efficient than
         seek/read for random access patterns, especially with large files.
     """
+    if MBOX_FILE_PATH is None:
+        raise ValueError(
+            "MBOX_FILE_PATH environment variable must be set to use this function"
+        )
     with open(MBOX_FILE_PATH, "rb") as f:
         with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             return mm[start:end]
@@ -417,6 +420,10 @@ def read_mbox_slices_concurrent(
         >>> regions = [(100, 200), (10_000, 11_000), (1_000_000, 1_010_000)]
         >>> results = read_mbox_slices_concurrent(regions)
     """
+    if MBOX_FILE_PATH is None:
+        raise ValueError(
+            "MBOX_FILE_PATH environment variable must be set to use this function"
+        )
     with open(MBOX_FILE_PATH, "rb") as f:
         with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:

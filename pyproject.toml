@@ -1,7 +1,7 @@
 [project]
 name = "mbox-viewer"
 version = "0.1.0"
-description = "Add your description here"
+description = "A web-based email viewer for MBOX archives with full-text search, threading, and RAG-powered semantic search"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
