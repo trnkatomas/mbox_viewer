@@ -87,7 +87,9 @@ def _html_to_text(content: str) -> str:
     """Strip HTML tags and decode entities to produce readable plain text."""
     stripper = _HTMLStripper()
     try:
-        stripper.feed(html.unescape(content))
+        # HTMLParser with convert_charrefs=True (the default) decodes entities
+        # automatically in handle_data, so no pre-unescaping is needed.
+        stripper.feed(content)
         return stripper.get_text()
     except Exception:
         return content
