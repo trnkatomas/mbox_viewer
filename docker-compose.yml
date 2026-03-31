@@ -1,17 +1,22 @@
 version: '3.8'
 
 services:
-  # Ollama service for embeddings
+  # Ollama service for embeddings.
+  # No external port — only reachable from the internal Docker network.
   ollama:
     image: ollama/ollama:latest
     container_name: mbox-ollama
-    ports:
-      - "11434:11434"
+    # Option 1: port removed — Ollama is internal-only
     volumes:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
     restart: unless-stopped
+    # Option 4: drop all Linux capabilities; Ollama needs none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # Optional: Add GPU support if available
     # deploy:
     #   resources:
@@ -25,8 +30,9 @@ services:
   mbox-viewer:
     build: .
     container_name: mbox-viewer-app
+    # Option 1: bind to localhost only — not reachable from the LAN
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./emails.db:/app/emails.db
       - ./mbox_files:/app/mbox_files:ro
@@ -37,6 +43,17 @@ services:
     depends_on:
       - ollama
     restart: unless-stopped
+    # Option 3: run as the non-root user created in the Dockerfile
+    user: "1000:1000"
+    # Option 3: read-only root filesystem; only explicitly listed paths are writable
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Option 4: drop all Linux capabilities; uvicorn needs none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     command: uvicorn email_server:app --host 0.0.0.0 --port 8000
 
 volumes:
