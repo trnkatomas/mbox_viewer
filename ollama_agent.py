@@ -27,6 +27,7 @@ import sys
 import ollama
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.types import TextContent
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +113,7 @@ async def run_agent(model: str, initial_query: str | None, verbose: bool = False
 
                         result = await session.call_tool(fn.name, dict(args))
                         first = result.content[0] if result.content else None
-                        tool_text = first.text if first is not None and hasattr(first, "text") else ""
+                        tool_text = first.text if isinstance(first, TextContent) else ""
 
                         if verbose:
                             preview = tool_text[:200].replace("\n", " ")
