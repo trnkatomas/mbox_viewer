@@ -33,7 +33,7 @@ from mcp.client.stdio import stdio_client
 # Core agent loop
 # ---------------------------------------------------------------------------
 
-async def run_agent(model: str, user_query: str, verbose: bool = False) -> None:
+async def run_agent(model: str, initial_query: str | None, verbose: bool = False) -> None:
     server_script = os.path.join(os.path.dirname(__file__), "mcp_server.py")
 
     server_params = StdioServerParameters(
@@ -64,47 +64,61 @@ async def run_agent(model: str, user_query: str, verbose: bool = False) -> None:
                 names = [t.name for t in tools_result.tools]
                 print(f"[agent] {len(names)} tools available: {', '.join(names)}\n", flush=True)
 
-            # --- agentic loop --------------------------------------------
-            messages: list[dict] = [{"role": "user", "content": user_query}]
             client = ollama.AsyncClient()
 
+            # --- REPL: one MCP session, many queries ----------------------
+            first_query = initial_query
             while True:
-                response = await client.chat(
-                    model=model,
-                    messages=messages,
-                    tools=ollama_tools,
-                )
-                msg = response.message
+                if first_query:
+                    query = first_query
+                    first_query = None
+                else:
+                    try:
+                        query = input("\nQuery (Ctrl-D to quit): ").strip()
+                    except EOFError:
+                        break
+                    if not query:
+                        continue
 
-                # Accumulate the assistant turn (Ollama may return tool_calls=None)
-                assistant_entry: dict = {
-                    "role": "assistant",
-                    "content": msg.content or "",
-                }
-                if msg.tool_calls:
-                    assistant_entry["tool_calls"] = msg.tool_calls
-                messages.append(assistant_entry)
+                # Fresh message history per query (stateless between turns)
+                messages: list[dict] = [{"role": "user", "content": query}]
 
-                if not msg.tool_calls:
-                    # Final answer
-                    print(msg.content)
-                    break
+                # --- agentic tool-calling loop ----------------------------
+                while True:
+                    response = await client.chat(
+                        model=model,
+                        messages=messages,
+                        tools=ollama_tools,
+                    )
+                    msg = response.message
 
-                # --- call each tool via MCP --------------------------------
-                for tc in msg.tool_calls:
-                    fn = tc.function
-                    args = fn.arguments or {}
-                    if verbose:
-                        print(f"[tool] {fn.name}({json.dumps(args, ensure_ascii=False)})", flush=True)
+                    assistant_entry: dict = {
+                        "role": "assistant",
+                        "content": msg.content or "",
+                    }
+                    if msg.tool_calls:
+                        assistant_entry["tool_calls"] = msg.tool_calls
+                    messages.append(assistant_entry)
 
-                    result = await session.call_tool(fn.name, args)
-                    tool_text = result.content[0].text if result.content else ""
+                    if not msg.tool_calls:
+                        print(msg.content)
+                        break
 
-                    if verbose:
-                        preview = tool_text[:200].replace("\n", " ")
-                        print(f"       → {preview}{'…' if len(tool_text) > 200 else ''}\n", flush=True)
+                    for tc in msg.tool_calls:
+                        fn = tc.function
+                        args = fn.arguments or {}
+                        if verbose:
+                            print(f"[tool] {fn.name}({json.dumps(args, ensure_ascii=False)})", flush=True)
 
-                    messages.append({"role": "tool", "content": tool_text})
+                        result = await session.call_tool(fn.name, dict(args))
+                        first = result.content[0] if result.content else None
+                        tool_text = first.text if first is not None and hasattr(first, "text") else ""
+
+                        if verbose:
+                            preview = tool_text[:200].replace("\n", " ")
+                            print(f"       → {preview}{'…' if len(tool_text) > 200 else ''}\n", flush=True)
+
+                        messages.append({"role": "tool", "content": tool_text})
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +150,7 @@ def main() -> None:
         print("Error: MBOX_FILE_PATH environment variable is not set.", file=sys.stderr)
         sys.exit(1)
 
-    query = args.query or input("Query: ").strip()
-    if not query:
-        print("No query provided.", file=sys.stderr)
-        sys.exit(1)
-
-    asyncio.run(run_agent(args.model, query, verbose=args.verbose))
+    asyncio.run(run_agent(args.model, args.query or None, verbose=args.verbose))
 
 
 if __name__ == "__main__":
