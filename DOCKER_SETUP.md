@@ -60,6 +60,12 @@ The viewer has no authentication. Setting `MBOX_VIEWER_BIND=0.0.0.0` makes
 your mail readable by anyone on the network, so only do that on a trusted LAN
 or behind a reverse proxy that adds a login.
 
+All containers drop every Linux capability and run with `no-new-privileges`.
+The indexer and viewer also have a read-only root filesystem: the only
+writable paths are `/tmp` (a tmpfs) and, for the indexer, `INDEX_DIR`. Ollama
+publishes no port; the indexer and viewer reach it over the compose network,
+and models can be pulled with `docker exec mbox-ollama ollama pull <model>`.
+
 ## Running on a NAS (TrueNAS Scale and similar)
 
 TrueNAS Scale 24.10+ runs custom apps from compose YAML (*Apps → Discover Apps

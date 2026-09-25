@@ -22,15 +22,21 @@ x-mbox-viewer: &mbox-viewer
     - OLLAMA_MODEL=${OLLAMA_MODEL:-embeddinggemma}
     # auto: embed when Ollama is running (rag profile), otherwise index without
     - INDEX_EMBEDDINGS=${INDEX_EMBEDDINGS:-auto}
+  # The app only writes to the mounted index directory (indexer) and /tmp
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
 
 services:
   ollama:
     image: ollama/ollama:latest
     container_name: mbox-ollama
     profiles: ["rag"]
-    # Reachable by the other containers; only publish it to the host loopback.
-    ports:
-      - "127.0.0.1:11434:11434"
+    # No published port: only the indexer and viewer reach it, over the compose network
     volumes:
       - ollama_data:/root/.ollama
     environment:
@@ -41,6 +47,10 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # Optional: Add GPU support if available
     # deploy:
     #   resources:
