@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HTMX Email Client - Light Mode</title>
+    <title>MBox Viewer</title>
 
     <!-- Load Tailwind CSS CDN for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -12,6 +12,7 @@
     <!-- D3.js CDN for interactive charts -->
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="/static/sim_script.js"></script>
+    <script src="/static/email_frames.js"></script>
 
 
     <style>
@@ -24,6 +25,7 @@
             transform: translateY(-1px);
             box-shadow: 0 4px 10px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
         }
+        .email-list-item.is-selected { background-color: #eff6ff; border-left-color: #3b82f6; }
         /* Style for D3.js tooltips */
         .tooltip {
             z-index: 50;
@@ -52,7 +54,7 @@
                     hx-history="true"
                 >
                     <svg class="w-6 h-6 md:mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-3"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M22 10h-4M22 10l-4 4M22 10l-4-4"></path></svg>
-                    <span class="hidden md:block">Inbox (3)</span>
+                    <span class="hidden md:block">All mail</span>
                 </a>
 
                 <a href="#"
