@@ -1,6 +1,7 @@
 # Database files
 emails.db
 emails.chromadb/
+index/
 
 # Python
 __pycache__/
@@ -48,3 +49,10 @@ htmlcov/
 .tox/
 coverage.xml
 *.cover
+
+# Coverage report
+coverage.json
+
+# Database backups and in-progress migrations
+*.db.bak
+*.db.migrating

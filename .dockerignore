@@ -1,0 +1,14 @@
+.venv
+.git
+.claude
+.idea
+.mypy_cache
+.pytest_cache
+__pycache__
+htmlcov
+.coverage
+coverage.json
+emails.db*
+emails.chromadb
+*.mbox
+tests
