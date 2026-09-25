@@ -26,8 +26,6 @@ from fastapi.templating import Jinja2Templates
 from email_service import parse_search_query
 from email_utils import (
     get_one_email,
-    get_thread_for_email,
-    load_email_content_search,
     load_email_db,
 )
 
@@ -43,7 +41,7 @@ EMAILS_PER_PAGE = 5
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Load the database and initialize VSS extension
     db = load_email_db()
-    db_connections["duckdb"] = load_email_content_search(db)
+    db_connections["duckdb"] = db
     yield
     # Clean up the DB connections
     if duckdb_con := db_connections.get("duckdb"):
