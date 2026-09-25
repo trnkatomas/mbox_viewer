@@ -34,7 +34,9 @@ from mcp.types import TextContent
 # Core agent loop
 # ---------------------------------------------------------------------------
 
-async def run_agent(model: str, initial_query: str | None, verbose: bool = False) -> None:
+async def run_agent(
+    model: str, initial_query: str | None, verbose: bool = False, max_steps: int = 10
+) -> None:
     server_script = os.path.join(os.path.dirname(__file__), "mcp_server.py")
 
     server_params = StdioServerParameters(
@@ -85,7 +87,7 @@ async def run_agent(model: str, initial_query: str | None, verbose: bool = False
                 messages: list[dict] = [{"role": "user", "content": query}]
 
                 # --- agentic tool-calling loop ----------------------------
-                while True:
+                for _ in range(max_steps):
                     response = await client.chat(
                         model=model,
                         messages=messages,
@@ -119,7 +121,13 @@ async def run_agent(model: str, initial_query: str | None, verbose: bool = False
                             preview = tool_text[:200].replace("\n", " ")
                             print(f"       → {preview}{'…' if len(tool_text) > 200 else ''}\n", flush=True)
 
-                        messages.append({"role": "tool", "content": tool_text})
+                        messages.append({"role": "tool", "tool_name": fn.name, "content": tool_text})
+                else:
+                    print(
+                        f"[agent] stopped after {max_steps} tool-calling rounds without a final answer; "
+                        "try a more specific question or raise --max-steps.",
+                        file=sys.stderr,
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,13 +140,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="qwen2.5:7b",
-        help="Ollama model name (must support tool use). Default: qwen2.5:7b",
+        default="gemma4:e2b",
+        help="Ollama model name (must support tool use). Default: gemma4:e2b",
     )
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print tool calls and response previews.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=10,
+        help="Maximum tool-calling rounds per query. Default: 10",
     )
     parser.add_argument(
         "query",
@@ -151,7 +165,7 @@ def main() -> None:
         print("Error: MBOX_FILE_PATH environment variable is not set.", file=sys.stderr)
         sys.exit(1)
 
-    asyncio.run(run_agent(args.model, args.query or None, verbose=args.verbose))
+    asyncio.run(run_agent(args.model, args.query or None, verbose=args.verbose, max_steps=args.max_steps))
 
 
 if __name__ == "__main__":
