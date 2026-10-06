@@ -56,3 +56,12 @@ coverage.json
 # Database backups and in-progress migrations
 *.db.bak
 *.db.migrating
+
+# Mail data and local agent state: never commit
+*.mbox
+*.mbx
+*.eml
+mbox_samples/
+index/
+.claude/worktrees/
+.claude/settings.local.json
