@@ -66,31 +66,65 @@ writable paths are `/tmp` (a tmpfs) and, for the indexer, `INDEX_DIR`. Ollama
 publishes no port; the indexer and viewer reach it over the compose network,
 and models can be pulled with `docker exec mbox-ollama ollama pull <model>`.
 
-## Running on a NAS (TrueNAS Scale and similar)
+## Running on TrueNAS (Community Edition)
 
-TrueNAS Scale 24.10+ runs custom apps from compose YAML (*Apps → Discover Apps
-→ Custom App → Install via YAML*), or you can use `docker compose` over SSH.
+Use `docker-compose.truenas.yml`, not `docker-compose.yml`. TrueNAS's
+*Install via YAML* runs the file exactly as written and has no `.env` file, so
+the `${...}` settings in the main compose file would silently fall back to
+defaults like `./mbox_files` that don't exist on the NAS. The TrueNAS file uses
+literal values and the prebuilt image `ghcr.io/trnkatomas/mbox_viewer`, so
+nothing is built on the NAS.
 
-- Point `MBOX_DIR` at the dataset holding the mbox. It is only ever read.
-- Put `INDEX_DIR` on a dataset for app data and make it writable by the
-  container user. On TrueNAS that is typically the `apps` user, so set
-  `PUID=568` and `PGID=568`.
+1. **Create two datasets**, one for the mbox (e.g. `/mnt/POOL/mail`) and one
+   for the index (e.g. `/mnt/POOL/apps/mbox`). The app runs as the `apps` user
+   (uid/gid 568): give it read access to the mail dataset and write access to
+   the index dataset (*Datasets → Edit Permissions*).
+2. **Copy the mbox** into the mail dataset.
+3. **Install**: *Apps → Discover Apps → ⋮ → Install via YAML*, name it
+   `mbox-viewer`, and paste `docker-compose.truenas.yml`. Replace every
+   `/mnt/POOL/...` path, and `emails.mbox` if your file is named differently
+   (it appears in both services).
+4. **First start**: the `indexer` container indexes the mailbox and exits; the
+   `viewer` starts once it has finished. Follow progress in the indexer's logs.
+   The viewer is then at `http://<nas-ip>:8000`.
+
+The viewer has no login. Anyone who can reach port 8000 can read the mail, so
+keep it on a trusted network or put it behind a reverse proxy that adds
+authentication.
+
+To **choose a different mbox**, change `MBOX_FILE_PATH` in both services. The
+index belongs to one specific file (it stores byte offsets), so give each
+mailbox its own index dataset; pointing an existing index at a different file
+makes the indexer rebuild it for the new one.
+
+After **replacing the mbox** with a new export, restart the app: the indexer
+detects the mismatch and rebuilds. If the new export only *appends* to the old
+file, just the new messages are indexed.
+
+The image tag is `latest` by default. Once versions are tagged (`v1.2.3`), pin
+one (`:1.2.3`) so updates happen only when you edit the tag.
+
+### Storage and performance
+
 - The index is much smaller than the mbox (no attachments, text capped per
   message) but is read constantly while searching. SSD-backed storage (e.g. the
   apps pool) helps, but spinning disks work.
 - **Embeddings on a CPU-only NAS are slow**: expect hours for a large mailbox.
-  Options:
-  - Leave out the `rag` profile. You get everything except `rag:` search, and
-    can add embeddings later; only missing ones are computed.
-  - Build the index on a faster machine and copy `emails.db` into `INDEX_DIR`.
-    The index stores byte offsets, not paths, so it works against an identical
-    copy of the mbox. The indexer verifies that on start.
-  - Point `OLLAMA_URL` in `docker-compose.yml` at an Ollama running on another
-    machine with a GPU.
+  The TrueNAS file therefore starts without Ollama (`INDEX_EMBEDDINGS: "off"`),
+  which gives you everything except `rag:` search. Options for adding it:
+  - Uncomment the `ollama` service and the indexer's `depends_on`, and set
+    `INDEX_EMBEDDINGS` to `auto`. Only missing embeddings are computed.
+  - Build the index on a faster machine and copy `emails.db` into the index
+    dataset. The index stores byte offsets, not paths, so it works against an
+    identical copy of the mbox; the indexer verifies that on start.
+  - Point `OLLAMA_URL` at an Ollama running on another machine with a GPU, and
+    set `INDEX_EMBEDDINGS` to `auto`.
 
-After replacing the mbox (e.g. with a new Takeout export), restart the stack.
-The indexer detects the mismatch and rebuilds. If the new export only
-*appends* to the old file, just the new messages are indexed.
+### Other NAS systems
+
+Anywhere you can run `docker compose` over SSH, the main `docker-compose.yml`
+with a `.env` file (see *Quick start*) works too; set `PUID`/`PGID` to the user
+that owns the datasets.
 
 ## Manual indexing
 

@@ -1,0 +1,92 @@
+# TrueNAS Community Edition: Apps -> Discover Apps -> ⋮ -> Install via YAML.
+# Paste this file, then replace every /mnt/POOL/... path below.
+#
+# TrueNAS runs this file as written, so there is no .env file and no ${VAR}
+# substitution: all values are literal. See DOCKER_SETUP.md ("Running on
+# TrueNAS") for the dataset and permission steps.
+#
+# Before the first install, create two datasets:
+#   /mnt/POOL/mail          holds the mbox; the apps user (568) needs read access
+#   /mnt/POOL/apps/mbox     holds the index; the apps user (568) needs write access
+#
+# To use a different mbox, change MBOX_FILE_PATH in BOTH services. A new file
+# needs its own index: point /data/index at a new dataset, or the old index is
+# rebuilt for the new file.
+
+name: mbox-viewer
+
+services:
+  # Brings the index up to date, then exits. The first run indexes the whole
+  # mbox; later runs only read messages appended since, and rebuild if the
+  # mbox was replaced.
+  indexer:
+    image: ghcr.io/trnkatomas/mbox_viewer:latest
+    command: ["python", "email_utils.py", "index", "--rebuild-if-stale"]
+    user: "568:568"
+    environment:
+      MBOX_FILE_PATH: /data/mbox/emails.mbox
+      EMAILS_DB_PATH: /data/index/emails.db
+      # off: no semantic (rag:) search. Set to auto after enabling Ollama below.
+      INDEX_EMBEDDINGS: "off"
+      OLLAMA_URL: http://ollama:11434/api/embed
+      OLLAMA_MODEL: embeddinggemma
+    volumes:
+      - /mnt/POOL/mail:/data/mbox:ro
+      - /mnt/POOL/apps/mbox:/data/index
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    # Uncomment together with the ollama service:
+    # depends_on:
+    #   ollama:
+    #     condition: service_healthy
+
+  viewer:
+    image: ghcr.io/trnkatomas/mbox_viewer:latest
+    user: "568:568"
+    environment:
+      MBOX_FILE_PATH: /data/mbox/emails.mbox
+      EMAILS_DB_PATH: /data/index/emails.db
+      OLLAMA_URL: http://ollama:11434/api/embed
+    volumes:
+      - /mnt/POOL/mail:/data/mbox:ro
+      - /mnt/POOL/apps/mbox:/data/index:ro
+    # Reachable from your LAN at http://<nas-ip>:8000. The viewer has NO login:
+    # anyone who can reach this port can read your mail. Keep it on a trusted
+    # network or put it behind a reverse proxy that adds authentication.
+    ports:
+      - "8000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      indexer:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Optional: semantic (rag:) search. Embedding a large mailbox on a CPU-only
+  # NAS takes hours; you can enable this later and only missing embeddings
+  # are computed. To enable: uncomment this service, the indexer's
+  # depends_on, and set INDEX_EMBEDDINGS to auto.
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   environment:
+  #     OLLAMA_HOST: 0.0.0.0
+  #   volumes:
+  #     - /mnt/POOL/apps/ollama:/root/.ollama
+  #   healthcheck:
+  #     test: ["CMD", "ollama", "list"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 12
+  #   restart: unless-stopped

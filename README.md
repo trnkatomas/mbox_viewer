@@ -340,6 +340,12 @@ MBOX_DIR=/mnt/tank/mail MBOX_FILE=takeout.mbox INDEX_DIR=/mnt/tank/apps/mbox-vie
 Add `COMPOSE_PROFILES=rag` to also run Ollama for `rag:` search. See
 [DOCKER_SETUP.md](DOCKER_SETUP.md) for all settings.
 
+On **TrueNAS** (*Install via YAML*), use
+[`docker-compose.truenas.yml`](docker-compose.truenas.yml) instead: TrueNAS
+can't supply the `.env` settings above, so that file uses literal paths and
+the prebuilt image `ghcr.io/trnkatomas/mbox_viewer`. Setup steps are in
+[DOCKER_SETUP.md](DOCKER_SETUP.md#running-on-truenas-community-edition).
+
 ## License
 
 MIT License - see [https://opensource.org/licenses/MIT](https://opensource.org/licenses/MIT)
