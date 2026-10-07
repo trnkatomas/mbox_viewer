@@ -1,165 +1,146 @@
 import datetime
 import logging
-import re
-import time
-from collections.abc import Mapping
+import os
 from contextlib import asynccontextmanager
-from typing import (
-    TYPE_CHECKING,
-    Annotated,
-    Any,
-    AsyncGenerator,
-    Dict,
-    List,
-    Optional,
-    Union,
-)
+from typing import TYPE_CHECKING, Annotated, Any, AsyncGenerator, Dict, Iterator, List, Optional
+from urllib.parse import quote, urlencode
 
-logger = logging.getLogger(__name__)
-
-import pandas as pd
-from fastapi import FastAPI, Form, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi import Depends, FastAPI, Form, Query, Request, status
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from email_service import parse_search_query
+import email_service
+from email_render import render_email_frame
 from email_utils import (
-    get_one_email,
-    get_thread_for_email,
-    load_email_content_search,
+    InvalidQueryError,
+    RagUnavailableError,
+    check_index_freshness,
+    get_mbox_path,
     load_email_db,
 )
 
 if TYPE_CHECKING:
     import duckdb
 
-db_connections: Dict[str, Union["duckdb.DuckDBPyConnection"]] = {}
+logger = logging.getLogger(__name__)
 
-EMAILS_PER_PAGE = 5
+db_connections: Dict[str, "duckdb.DuckDBPyConnection"] = {}
+
+EMAILS_PER_PAGE = 25
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # Load the database and initialize VSS extension
-    db = load_email_db()
-    db_connections["duckdb"] = load_email_content_search(db)
+    db_connections["duckdb"] = load_email_db()
+    _warn_if_index_stale(db_connections["duckdb"])
     yield
-    # Clean up the DB connections
     if duckdb_con := db_connections.get("duckdb"):
-        if hasattr(duckdb_con, "close"):
-            duckdb_con.close()
+        duckdb_con.close()
     db_connections.clear()
 
 
-# --- Setup and Configuration ---
-# 1. Initialize FastAPI
+def _warn_if_index_stale(db: "duckdb.DuckDBPyConnection") -> None:
+    """Messages are read by byte offset, so a replaced mbox would show the wrong mail."""
+    try:
+        problem = check_index_freshness(db, get_mbox_path())
+    except Exception as e:
+        logger.warning("Could not verify the index against the mbox: %s", e)
+        return
+    if problem:
+        logger.error(
+            "The index does not match the mbox (%s); messages will not display correctly. "
+            "Run `python email_utils.py index --rebuild`.",
+            problem,
+        )
+
+
 app = FastAPI(title="FastAPI HTMX Email Client", lifespan=lifespan)
-
-# 2. Configure Static Files (for CSS/JS/HTMX)
-# Assumes static assets (output.css, bundle.js) are placed in a 'static' directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# 3. Configure Templating (for the base HTML page)
-# Assumes index.html is placed in a 'templates' directory
 templates = Jinja2Templates(directory="templates")
 
 
-def create_list_item_fragment(
-    email: Dict[str, Union[str, int]],
-    is_last: bool = False,
-    next_page: int = 0,
-    query: str = "",
-    folder: str = "",
-) -> str:
-    """Generates the HTML for a single email item."""
-    preview_text = email["excerpt"]
+def format_date(value: Any) -> str:
+    if isinstance(value, datetime.datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    if value is None or (isinstance(value, float) and value != value):
+        return ""
+    return str(value)
 
-    template = templates.get_template("email_list.jinja")
-    output = template.render(
-        email_id=email["message_id"],
-        sender_name=email["from_email"],
-        email_date=email["date"],
-        email_subject=email["subject"],
-        preview_text=preview_text,
-        is_last=is_last,
-        next_page=next_page,
-        query=query,
-        folder=folder,
+
+def format_size(size: Any) -> str:
+    size = float(size or 0)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+templates.env.filters["format_date"] = format_date
+templates.env.filters["format_size"] = format_size
+
+
+def get_db() -> Iterator["duckdb.DuckDBPyConnection"]:
+    """A cursor per request: DuckDB connections must not be shared across threads."""
+    cursor = db_connections["duckdb"].cursor()
+    try:
+        yield cursor
+    finally:
+        cursor.close()
+
+
+Db = Annotated[Any, Depends(get_db)]
+
+
+def _message_view(
+    email_meta: Dict[str, Any],
+    body: Optional[str],
+    body_type: str,
+    attachments: List[Dict[str, Any]],
+    inline_images: Optional[Dict[str, Any]],
+    allow_remote: bool,
+) -> Dict[str, Any]:
+    frame_html, has_remote = render_email_frame(body, body_type, inline_images, allow_remote)
+    return {
+        "message_id": email_meta["message_id"],
+        "subject": email_meta.get("subject"),
+        "from_email": email_meta.get("from_email"),
+        "to_email": email_meta.get("to_email"),
+        "date": email_meta.get("date"),
+        "attachments": attachments,
+        "frame_html": frame_html,
+        "remote_blocked": has_remote and not allow_remote,
+    }
+
+
+def _message_fragment(text: str, tone: str = "gray") -> str:
+    template = templates.env.from_string(
+        '<div class="p-6 text-center text-sm text-{{ tone }}-600">{{ text }}</div>'
     )
-    return output
+    return template.render(text=text, tone=tone)
 
 
-def create_detail_fragment(
-    email_meta: Mapping[Any, Any],
-    email_content: Optional[str],
-    attachments: List[Dict[str, Union[str, bytes, int]]],
-    is_in_thread: List[Dict[str, Union[str, int]]],
-) -> str:
-    """Generates the HTML for the email detail pane."""
-    email_detail_template = templates.get_template("email_detail.jinja")
-    thread_id = is_in_thread[0].get("thread_id") if is_in_thread else None
-    output = email_detail_template.render(
-        email_id=email_meta["message_id"],
-        email_subject=email_meta["subject"],
-        email_sender=email_meta["from_email"],
-        email_date=email_meta["date"],
-        email_body=email_content,
-        has_attachment=email_meta["has_attachment"],
-        attachments=attachments,
-        thread=len(is_in_thread),
-        thread_id=thread_id,
-    )
-    return output
+def content_disposition(filename: str) -> str:
+    """RFC 6266 header with an ASCII fallback and the exact UTF-8 name."""
+    ascii_name = filename.encode("ascii", "ignore").decode().replace("\\", "_").replace('"', "_")
+    ascii_name = "".join(ch for ch in ascii_name if ch.isprintable()) or "attachment"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
-def create_thread_detail_fragment(
-    email_meta: Optional[Dict[str, Union[str, int]]],
-    email_content: Optional[str],
-    attachments: Optional[List[Dict[str, Union[str, bytes, int]]]],
-    enriched_thread: List[Dict[str, Any]],
-) -> str:
-    """
-    Generates the HTML for the thread detail pane.
-
-    Args:
-        email_meta: Unused (kept for backwards compatibility)
-        email_content: Unused (kept for backwards compatibility)
-        attachments: Unused (kept for backwards compatibility)
-        enriched_thread: List of already-enriched email dicts with parsed content
-
-    Returns:
-        HTML string for thread detail view
-    """
-    email_thread_detail_template = templates.get_template("email_detail_thread.jinja")
-    output = email_thread_detail_template.render(
-        thread_emails=enriched_thread,
-        thread_count=len(enriched_thread),
-        thread_id=enriched_thread[0].get("thread_id") if enriched_thread else None,
-    )
-    return output
+# --- Routes ---
 
 
-# --- FastAPI Routes ---
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request) -> HTMLResponse:
-    """Route to serve the base HTML template."""
-    # Templates.TemplateResponse requires the request object
-    return templates.TemplateResponse("index.html", {"request": request})
+def index(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/api/stats/layout", response_class=HTMLResponse)
-async def stats_layout(request: Request) -> HTMLResponse:
-    """Route to serve the base HTML template."""
-    from email_service import get_stats_summary
-
-    stats_template = templates.get_template("stats.jinja")
-
-    # Use service layer to get stats summary
-    stats = get_stats_summary(db_connections["duckdb"])
-
+def stats_layout(db: Db) -> HTMLResponse:
+    stats = email_service.get_stats_summary(db)
     return HTMLResponse(
-        content=stats_template.render(
+        templates.get_template("stats.jinja").render(
             all_emails=stats["all_emails"],
             days_timespan=stats["days_timespan"],
             avg_size=stats["avg_size"],
@@ -168,158 +149,146 @@ async def stats_layout(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
-async def stats_data(query_name: str) -> List[Dict[str, Any]]:
-    """Route to serve stats time series data."""
-    from email_service import get_stats_time_series
-
-    # Use service layer to get time series data
-    return get_stats_time_series(db_connections["duckdb"], query_name)
+def stats_data(query_name: str, db: Db) -> List[Dict[str, Any]]:
+    return email_service.get_stats_time_series(db, query_name)
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
-async def inbox_layout(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("mail_list.jinja", {"request": request})
+def inbox_layout() -> HTMLResponse:
+    return HTMLResponse(templates.get_template("mail_list.jinja").render(folder=""))
 
 
 @app.get("/api/sent/layout", response_class=HTMLResponse)
-async def sent_layout(request: Request) -> HTMLResponse:
-    mail_list_template = templates.get_template("mail_list.jinja")
-    rendered_mail_list = mail_list_template.render(folder="Sent")
-    return HTMLResponse(content=rendered_mail_list)
+def sent_layout() -> HTMLResponse:
+    return HTMLResponse(templates.get_template("mail_list.jinja").render(folder="Sent"))
 
 
 @app.post("/api/search", response_class=HTMLResponse)
-async def handle_search(search_input: Annotated[str, Form()]) -> HTMLResponse:
-    parsed_search_query = parse_search_query(search_input)
-    return await email_list(page=1, query=search_input)
+def handle_search(
+    search_input: Annotated[str, Form()],
+    db: Db,
+    folder: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    return email_list(db=db, page=1, query=search_input, folder=folder)
 
 
 @app.get("/api/email/list", response_class=HTMLResponse)
-async def email_list(
+def email_list(
+    db: Db,
     page: int = Query(1, ge=1),
     query: Optional[str] = None,
     folder: Optional[str] = None,
 ) -> HTMLResponse:
-    """HTMX route to load the initial list and handle infinite scrolling."""
-    from email_service import search_emails
+    """HTMX route for the initial list and infinite scrolling."""
+    try:
+        result = email_service.search_emails(
+            db=db, query=query, page=page, page_size=EMAILS_PER_PAGE, folder=folder
+        )
+    except (RagUnavailableError, InvalidQueryError) as e:
+        return HTMLResponse(_message_fragment(str(e), tone="red"))
 
-    # Use service layer to get emails
-    result = search_emails(
-        db=db_connections["duckdb"],
-        query=query,
-        page=page,
-        page_size=EMAILS_PER_PAGE,
-        folder=folder,
+    next_url = None
+    if result["has_more"]:
+        params = {"page": result["next_page"], "query": query, "folder": folder}
+        next_url = "/api/email/list?" + urlencode({k: v for k, v in params.items() if v})
+
+    item_template = templates.get_template("email_list.jinja")
+    emails = result["emails"]
+    html_fragments = "".join(
+        item_template.render(
+            email=email,
+            next_url=next_url if i == len(emails) - 1 else None,
+        )
+        for i, email in enumerate(emails)
     )
-
-    page_emails = result["emails"]
-    has_more = result["has_more"]
-    next_page = result["next_page"]
-
-    # Generate HTML fragments
-    html_fragments = ""
-    if has_more:
-        for i, email in enumerate(page_emails):
-            is_last = i == len(page_emails) - 1
-            html_fragments += create_list_item_fragment(
-                email,
-                is_last=is_last,
-                next_page=next_page,
-                query=query or "",
-                folder=folder or "",
-            )
-    else:
-        for i, email in enumerate(page_emails):
-            html_fragments += create_list_item_fragment(
-                email,
-                is_last=False,
-                next_page=-1,
-                query=query or "",
-                folder=folder or "",
-            )
-        html_fragments += """
-            <div class="text-center p-4 text-gray-600 border-t border-gray-700">End of Inbox.</div>
-        """
-
-    return HTMLResponse(content=html_fragments)
+    if not result["has_more"]:
+        text = "No more emails." if emails or page > 1 else "No emails match this search."
+        html_fragments += _message_fragment(text)
+    return HTMLResponse(html_fragments)
 
 
 @app.get("/api/email/{email_id:path}", response_class=HTMLResponse)
-async def email_detail(email_id: str) -> HTMLResponse:
-    """HTMX route to load the detail pane content."""
-    from email_service import get_email_with_thread
-
-    # Use service layer to get email details
-    result = get_email_with_thread(db=db_connections["duckdb"], email_id=email_id)
-
+def email_detail(email_id: str, db: Db, remote: bool = False) -> HTMLResponse:
+    """HTMX route for the detail pane."""
+    result = email_service.get_email_with_thread(db=db, email_id=email_id)
     if result is None:
         return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Email not found.</div>",
+            _message_fragment("Error: Email not found.", tone="red"),
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
+    email_meta = result["email_meta"]
+    message = _message_view(
+        email_meta,
+        result["email_content"],
+        result.get("body_type", "HTML"),
+        result["attachments"] or [],
+        result.get("inline_images"),
+        remote,
+    )
+    thread = result["thread"]
     return HTMLResponse(
-        content=create_detail_fragment(
-            result["email_meta"],
-            result["email_content"],
-            result["attachments"],
-            result["thread"],
+        templates.get_template("email_detail.jinja").render(
+            message=message,
+            thread_count=len(thread),
+            thread_id=email_meta.get("thread_id") if len(thread) > 1 else None,
+            remote_url=f"/api/email/{quote(email_id, safe='')}?remote=true",
         )
     )
 
 
 @app.get("/api/email_thread/{thread_id}", response_class=HTMLResponse)
-async def email_thread_detail(thread_id: str) -> HTMLResponse:
-    """HTMX route to load the detail pane content."""
-    from email_service import get_thread_with_emails
-
-    # Use service layer to get enriched thread emails
-    enriched_thread = get_thread_with_emails(
-        db=db_connections["duckdb"], thread_id=thread_id
-    )
-
+def email_thread_detail(thread_id: str, db: Db, remote: bool = False) -> HTMLResponse:
+    enriched_thread = email_service.get_thread_with_emails(db=db, thread_id=thread_id)
     if enriched_thread is None:
         return HTMLResponse(
-            content="<div class='p-8 text-center text-red-400'>Error: Thread not found.</div>",
+            _message_fragment("Error: Thread not found.", tone="red"),
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
+    messages = [
+        _message_view(
+            email,
+            email.get("parsed_body"),
+            email.get("body_type", "HTML"),
+            email.get("attachments") or [],
+            email.get("inline_images"),
+            remote,
+        )
+        for email in enriched_thread
+    ]
     return HTMLResponse(
-        content=create_thread_detail_fragment(None, None, None, enriched_thread)
+        templates.get_template("email_detail_thread.jinja").render(
+            messages=messages,
+            thread_count=len(messages),
+            remote_url=f"/api/email_thread/{quote(thread_id, safe='')}?remote=true",
+        )
     )
 
 
-@app.get("/api/attachment/{email_id:path}/{attachment_id}", response_class=Response)
-async def get_attachment_route(email_id: str, attachment_id: str) -> Response:
-    """Route to download email attachment."""
-    from email_service import get_attachment
+@app.get("/api/attachment/{email_id:path}/{index:int}", response_class=Response)
+def get_attachment_route(email_id: str, index: int, db: Db) -> Response:
+    attachment = email_service.get_attachment(db, email_id, index)
+    if not attachment or not isinstance(attachment.get("content"), bytes):
+        return Response("Attachment not found", status_code=status.HTTP_404_NOT_FOUND)
 
-    # Use service layer to get attachment
-    attachment = get_attachment(db_connections["duckdb"], email_id, attachment_id)
-
-    if not attachment or "content" not in attachment:
-        return Response(
-            content="Attachment not found",
-            status_code=status.HTTP_404_NOT_FOUND,
-        )
-
-    content_bytes = attachment["content"]
-    content_type_val = attachment["content_type"]
-
-    if isinstance(content_bytes, bytes) and isinstance(content_type_val, str):
-        return Response(
-            content=content_bytes,
-            media_type=content_type_val,
-            headers={"content-disposition": f'attachment; filename="{attachment_id}"'},
-        )
-    else:
-        return Response(
-            content="Invalid attachment data",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+    return Response(
+        content=attachment["content"],
+        media_type=attachment.get("content_type") or "application/octet-stream",
+        headers={
+            "Content-Disposition": content_disposition(attachment.get("filename") or "attachment"),
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+        },
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("email_server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "email_server:app",
+        host=os.getenv("MBOX_VIEWER_HOST", "127.0.0.1"),
+        port=int(os.getenv("MBOX_VIEWER_PORT", "8000")),
+        reload=True,
+    )

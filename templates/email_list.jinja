@@ -1,24 +1,20 @@
-    <div
-        class="list-item email-list-item cursor-pointer p-4 border-b border-gray-700 hover:bg-gray-200 transition duration-150 border-l-4 border-l-transparent"
-        hx-get="/api/email/{{email_id}}"
-        hx-target="#detail-pane"
-        hx-swap="innerHTML"
-        hx-indicator="#loading-indicator"
-    >
-        <div class="flex justify-between items-center">
-            <p class="{'font-semibold text-white' if is_unread else 'font-medium text-gray-300'} truncate">{{sender}}</p>
-            <span class="text-xs {'text-blue-400 font-bold' if is_unread else 'text-gray-400'}">{{email_date}}</span>
-        </div>
-        <p class="text-sm {'font-medium text-gray-200' if is_unread else 'text-gray-400'} truncate mt-1">{{email_subject}}</p>
-        <p class="text-xs text-gray-500 truncate mt-1">{{preview_text}}...</p>
-        {% if is_last %}
-                <div id="load-more-trigger"
-                    {# class="text-center p-4 text-gray-500 hover:text-blue-400 cursor-pointer border-t border-gray-700/50" #}
-                    hx-get="/api/email/list?page={{next_page}}{{ '&query='+query if query else '' }}{{ '&folder='+folder if folder else '' }}"
-                    hx-trigger="intersect once"
-                    hx-target="#email-list-container"
-                    hx-swap="beforeend"
-                ><!--span class="animate-pulse">Loading more emails (Page {{next_page}})...</span-->
-                </div>
-        {% endif %}
+<div class="list-item email-list-item cursor-pointer p-4 border-b border-gray-200 hover:bg-gray-100 transition duration-150 border-l-4 border-l-transparent"
+     hx-get="/api/email/{{ email.message_id | urlencode }}"
+     hx-target="#detail-pane"
+     hx-swap="innerHTML"
+     hx-indicator="#loading-indicator">
+    <div class="flex justify-between items-center gap-2">
+        <p class="font-medium text-gray-900 truncate">{{ email.from_email }}</p>
+        <span class="text-xs text-gray-500 shrink-0">{{ email.date | format_date }}</span>
     </div>
+    <p class="text-sm text-gray-700 truncate mt-1">{{ email.subject or "(no subject)" }}</p>
+    {% if email.excerpt %}
+    <p class="text-xs text-gray-500 truncate mt-1">{{ email.excerpt }}</p>
+    {% endif %}
+    {% if next_url %}
+    <div hx-get="{{ next_url }}"
+         hx-trigger="intersect once"
+         hx-target="#email-list-container"
+         hx-swap="beforeend"></div>
+    {% endif %}
+</div>

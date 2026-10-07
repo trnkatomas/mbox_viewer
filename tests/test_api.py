@@ -148,6 +148,7 @@ class TestEmailEndpoints:
         with patch("email_service.get_email_with_thread", return_value=mock_result):
             response = client.get("/api/email/<test1@example.com>")
             assert response.status_code == 200
+            assert "email-frame" in response.text
 
     def test_email_detail_not_found(self, client):
         """Test email detail with non-existent email."""
@@ -272,21 +273,111 @@ class TestAttachmentEndpoint:
     """Tests for attachment download endpoint."""
 
     def test_download_attachment(self, client):
-        """Test downloading an attachment."""
         mock_attachment = {
             "filename": "test.pdf",
             "content": b"PDF content",
             "content_type": "application/pdf",
         }
 
-        with patch("email_service.get_attachment", return_value=mock_attachment):
-            response = client.get("/api/attachment/<test1@example.com>/test.pdf")
+        with patch("email_service.get_attachment", return_value=mock_attachment) as get:
+            response = client.get("/api/attachment/<test1@example.com>/0")
             assert response.status_code == 200
             assert response.headers["content-type"] == "application/pdf"
-            assert "attachment" in response.headers["content-disposition"]
+            assert response.headers["content-disposition"].startswith("attachment;")
+            assert response.headers["x-content-type-options"] == "nosniff"
+            get.assert_called_once()
+            assert get.call_args.args[1:] == ("<test1@example.com>", 0)
+
+    def test_unicode_and_quote_in_filename(self, client):
+        mock_attachment = {
+            "filename": 'faktura "leden" česky.pdf',
+            "content": b"x",
+            "content_type": "application/pdf",
+        }
+        with patch("email_service.get_attachment", return_value=mock_attachment):
+            response = client.get("/api/attachment/<a@b>/0")
+            header = response.headers["content-disposition"]
+            assert 'filename="faktura _leden_ esky.pdf"' in header
+            assert "filename*=UTF-8''faktura%20%22leden%22%20%C4%8Desky.pdf" in header
 
     def test_attachment_not_found(self, client):
-        """Test downloading non-existent attachment."""
         with patch("email_service.get_attachment", return_value=None):
-            response = client.get("/api/attachment/<test1@example.com>/nonexistent.pdf")
+            response = client.get("/api/attachment/<test1@example.com>/7")
             assert response.status_code == 404
+
+
+def _detail_result(body, body_type="HTML"):
+    return {
+        "email_meta": {
+            "message_id": "<x@example.com>",
+            "subject": "Hello",
+            "from_email": "sender@example.com",
+            "to_email": "me@example.com",
+            "date": "2024-01-01 12:00:00",
+            "thread_id": "t1",
+        },
+        "email_content": body,
+        "body_type": body_type,
+        "attachments": [],
+        "inline_images": {},
+        "thread": [],
+    }
+
+
+class TestEmailRendering:
+    """The detail page must never let email HTML reach the app's own document."""
+
+    def test_textarea_breakout_is_neutralised(self, client):
+        body = "</textarea><script>alert(document.cookie)</script><p>hi</p>"
+        with patch("email_service.get_email_with_thread", return_value=_detail_result(body)):
+            html = client.get("/api/email/<x@example.com>").text
+        assert "<script>alert" not in html
+        assert "alert(document.cookie)" not in html
+        assert "<textarea" not in html
+
+    def test_iframe_has_opaque_origin(self, client):
+        with patch("email_service.get_email_with_thread", return_value=_detail_result("<p>hi</p>")):
+            html = client.get("/api/email/<x@example.com>").text
+        assert 'sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"' in html
+        assert "allow-same-origin" not in html
+
+    def test_remote_images_blocked_until_requested(self, client):
+        body = '<img src="https://tracker.example/p.gif">'
+        with patch("email_service.get_email_with_thread", return_value=_detail_result(body)):
+            blocked = client.get("/api/email/<x@example.com>").text
+            allowed = client.get("/api/email/<x@example.com>?remote=true").text
+        assert "Load remote images" in blocked
+        assert "img-src data:;" in blocked
+        assert "Load remote images" not in allowed
+        assert "img-src data: https: http:" in allowed
+
+    def test_list_item_shows_sender_and_encoded_link(self, client):
+        mock_result = {
+            "emails": [{
+                "message_id": "<a+b#c@example.com>",
+                "subject": "Subj",
+                "from_email": "Alice <alice@example.com>",
+                "date": "2024-01-01",
+                "excerpt": "Body",
+            }],
+            "total_count": 1, "has_more": False, "next_page": -1,
+        }
+        with patch("email_service.search_emails", return_value=mock_result):
+            html = client.get("/api/email/list").text
+        assert "Alice &lt;alice@example.com&gt;" in html
+        assert 'hx-get="/api/email/%3Ca%2Bb%23c%40example.com%3E"' in html
+        assert "{'font-semibold" not in html
+
+    def test_search_error_is_shown_not_raised(self, client):
+        from email_utils import RagUnavailableError
+
+        with patch("email_service.search_emails", side_effect=RagUnavailableError("Ollama down")):
+            response = client.get("/api/email/list?query=rag:hello")
+        assert response.status_code == 200
+        assert "Ollama down" in response.text
+
+    def test_search_in_sent_keeps_folder(self, client):
+        mock_result = {"emails": [], "total_count": 0, "has_more": False, "next_page": -1}
+        with patch("email_service.search_emails", return_value=mock_result) as search:
+            client.post("/api/search", data={"search_input": "hello", "folder": "Sent"})
+        assert search.call_args.kwargs["folder"] == "Sent"

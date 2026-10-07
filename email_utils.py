@@ -1,29 +1,68 @@
-import email
-import io
-import logging  # New import for structured debugging and information
+"""
+Data access, parsing and indexing for the mbox archive.
+
+The DuckDB file holds metadata (``emails``), chunk embeddings (``embeddings``)
+and index settings (``index_meta``). Raw messages are never copied into the
+database; they are read back from the mbox by byte offset.
+
+CLI:
+    python email_utils.py index [--rebuild]   # build or resume the index
+    python email_utils.py index --embeddings off  # metadata only, no Ollama needed
+    python email_utils.py migrate             # upgrade a pre-chunking database
+"""
+
+import email.utils
+import hashlib
+import logging
+import mmap
 import os
-import textwrap
-from dataclasses import dataclass
-from datetime import datetime
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from email.message import Message
 from email.parser import BytesParser
 from email.policy import default
-from functools import lru_cache
+from html.parser import HTMLParser
 from types import TracebackType
-from collections.abc import Mapping
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from collections.abc import Mapping, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
-import numpy as np
-import numpy.typing as npt
+import duckdb
 import pandas as pd
-from readabilipy import simple_json_from_html_string
+import requests
 
-# Set up a logger for the module
 logger = logging.getLogger(__name__)
 
-import chromadb
-import duckdb
-import requests
+DEFAULT_DB_PATH = "emails.db"
+DEFAULT_OLLAMA_URL = "http://localhost:11434/api/embed"
+DEFAULT_EMBEDDING_MODEL = "embeddinggemma"
+
+# Embedding models are trained with task prefixes; using the wrong ones (or
+# none) silently degrades retrieval, so they are keyed by model family.
+MODEL_PREFIXES: Dict[str, Tuple[str, str]] = {
+    "embeddinggemma": ("task: search result | query: ", "title: none | text: "),
+    "nomic-embed-text": ("search_query: ", "search_document: "),
+}
+
+# Cosine distance cut-off for semantic search hits (0 = identical, 2 = opposite).
+# With embeddinggemma, relevant mail typically lands at 0.5-0.75 and emails
+# embedded from empty text around 0.8+, so results are ranked and this only
+# drops the clearly unrelated tail.
+RAG_MAX_DISTANCE = float(os.getenv("RAG_MAX_DISTANCE", "0.75"))
+
+EXCERPT_CHARS = 200
+BODY_TEXT_MAX_CHARS = 100_000
+CHUNK_CHARS = 2000  # roughly 500 tokens
+CHUNK_OVERLAP_CHARS = 200
+MAX_CHUNKS_PER_EMAIL = 20
+
+
+class RagUnavailableError(RuntimeError):
+    """Semantic search was requested but the query could not be embedded."""
+
+
+class InvalidQueryError(ValueError):
+    """A search filter has a value that cannot be used (e.g. a malformed date)."""
 
 
 @dataclass
@@ -40,11 +79,9 @@ class Email:
     email_start: int
     email_end: int
     thread_id: str
-    labels: List[str]
+    labels: List[str] = field(default_factory=list)
     content_type: Optional[str] = None
     mbox_file_id: Optional[str] = None
-    i: Optional[int] = None
-    line: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Mapping[Any, Any]) -> "Email":
@@ -57,28 +94,55 @@ class Email:
             date=data["date"],
             excerpt=data.get("excerpt", ""),
             has_attachment=data.get("has_attachment", 0),
-            email_start=data["email_start"],
-            email_end=data["email_end"],
+            email_start=int(data["email_start"]),
+            email_end=int(data["email_end"]),
             thread_id=data.get("thread_id", ""),
             labels=data.get("labels", []),
             content_type=data.get("content_type"),
             mbox_file_id=data.get("mbox_file_id"),
-            i=data.get("i"),
-            line=data.get("line"),
         )
 
 
-# MBOX file path - must be set via MBOX_FILE_PATH environment variable
-# Set to None if not provided; functions using this will fail with clear error messages
-mboxfilename = os.getenv("MBOX_FILE_PATH")
+def get_mbox_path() -> str:
+    path = os.getenv("MBOX_FILE_PATH")
+    if not path:
+        raise ValueError("MBOX_FILE_PATH environment variable must be set")
+    return path
+
+
+def get_db_path() -> str:
+    return os.getenv("EMAILS_DB_PATH", DEFAULT_DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# mbox reading
+# ---------------------------------------------------------------------------
+
+# A real From_ separator carries a timestamp ("From x Mon Jan 01 00:00:00 2024");
+# requiring it keeps an unescaped "From " at the start of a body line from
+# splitting a message in two.
+_FROM_LINE_RE = re.compile(rb"^From \S+.*\d{1,2}:\d{2}(:\d{2})?")
+
+
+def _is_from_line(line: bytes) -> bool:
+    return line.startswith(b"From ") and _FROM_LINE_RE.match(line) is not None
 
 
 class MboxReader:
-    def __init__(self, filename: str) -> None:
+    """Streams messages from an mbox file along with their byte offsets."""
+
+    def __init__(self, filename: str, start: int = 0) -> None:
         self.handle = open(filename, "rb")
-        assert self.handle.readline().startswith(b"From ")
-        # move the position in file back to zero
-        self.handle.seek(0)
+        self.start = start
+        self.handle.seek(start)
+        first_line = self.handle.readline()
+        self.handle.seek(start)
+        # Resuming exactly at the end of the file is fine: there is nothing new.
+        at_eof = start > 0 and not first_line
+        if not at_eof and not first_line.startswith(b"From "):
+            self.handle.close()
+            where = f" at byte {start}" if start else ""
+            raise ValueError(f"{filename} does not look like an mbox file{where}")
 
     def __enter__(self) -> "MboxReader":
         return self
@@ -91,736 +155,1010 @@ class MboxReader:
     ) -> None:
         self.handle.close()
 
-    def __iter__(self) -> Generator[Tuple[Message, Tuple[int, int]], None, None]:
-        return iter(self.__next__())
-
-    def __next__(self) -> Generator[Tuple[Message, Tuple[int, int]], None, None]:
+    def __iter__(self) -> Iterator[Tuple[Message, Tuple[int, int]]]:
         lines: List[bytes] = []
-        line_counter = 0
-        bytes_start_counter = 0
-        bytes_end_counter = 0
-        while True:
-            line = self.handle.readline()
-            if line == b"" or line.startswith(b"From ") and line_counter > 0:
-                yield email.message_from_bytes(b"".join(lines), policy=default), (
-                    bytes_start_counter,
-                    bytes_end_counter,
-                )
-                bytes_start_counter = bytes_end_counter
-                bytes_end_counter += len(line)
-                if line == b"":
-                    break
-                lines = [line]
-                continue
+        start = pos = self.start
+        for line in self.handle:
+            if lines and _is_from_line(line):
+                yield _message_from_lines(lines), (start, pos)
+                lines = []
+                start = pos
             lines.append(line)
-            line_counter += 1
-            bytes_end_counter += len(line)
+            pos += len(line)
+        if lines:
+            yield _message_from_lines(lines), (start, pos)
+
+
+def _message_from_lines(lines: List[bytes]) -> Message:
+    return BytesParser(policy=default).parsebytes(b"".join(lines))
+
+
+def read_mbox_slice(start: int, end: int) -> bytes:
+    """Read one raw message from the mbox by byte offsets."""
+    with open(get_mbox_path(), "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            return mm[start:end]
 
 
 def to_string(_content: Union[bytes, bytearray, str]) -> str:
     if isinstance(_content, (bytes, bytearray)):
-        string_content = _content.decode("ascii", errors="ignore")
-    else:
-        string_content = _content
-    return string_content
+        return bytes(_content).decode("utf-8", errors="replace")
+    return _content
 
 
-def load_email_db(db_name: str = "emails.db") -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(db_name, read_only=True)
-    return con
+# ---------------------------------------------------------------------------
+# Message parsing
+# ---------------------------------------------------------------------------
 
 
-def get_one_email(db: duckdb.DuckDBPyConnection, email_id: str) -> pd.DataFrame:
-    rel = db.execute("select * from emails where message_id == ? limit 1", [email_id])
-    return rel.df()
+class _TextExtractor(HTMLParser):
+    _SKIP = {"script", "style", "head", "title", "noscript"}
+    _BLOCK = {
+        "p", "div", "br", "tr", "li", "ul", "ol", "table", "h1", "h2", "h3",
+        "h4", "h5", "h6", "blockquote", "pre", "hr", "section", "article",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return normalize_whitespace("".join(self._parts))
 
 
-def get_basic_stats(db: duckdb.DuckDBPyConnection) -> List[pd.DataFrame]:
-    all_emails = db.execute(
-        "select count(distinct message_id) as all_emails from emails limit 1"
-    ).df()
-    all_size = db.execute(
-        "select avg(email_end - email_start) as avg_size from emails limit 1"
-    ).df()
-    all_timespan = db.execute(
-        "select min(date) as first_seen, max(date) as last_seen from emails limit 1"
-    ).df()
-    return [all_emails, all_size, all_timespan]
+def normalize_whitespace(text: str) -> str:
+    """Collapse runs of spaces within lines and drop blank lines."""
+    lines = (re.sub(r"[ \t\r\f\v ]+", " ", line).strip() for line in text.split("\n"))
+    return "\n".join(line for line in lines if line)
 
 
-def get_email_sizes_in_time(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    stats_query = """
-    with raw_data as (
-        select 1 as dummy, date_trunc('month', date) as mmonth, (email_end-email_start) as size from emails
-    ),
-    monthly_sizes as (
-        select mmonth, sum(size) as sizes from raw_data group by mmonth
+def html_to_text(content: str) -> str:
+    """Convert HTML to readable plain text, keeping paragraph breaks."""
+    extractor = _TextExtractor()
+    try:
+        extractor.feed(content)
+        extractor.close()
+        return extractor.text()
+    except Exception:
+        return content
+
+
+def _is_attachment_part(part: Message) -> bool:
+    disposition = part.get("Content-Disposition")
+    return bool(part.get_filename()) or (
+        disposition is not None and str(disposition).lower().startswith("attachment")
     )
-    select 1 as dummy, mmonth as date, sum(sizes) over (partition by dummy order by mmonth) as count from monthly_sizes
-    """
-    results = db.execute(stats_query).df()
-    return results
 
 
-def get_domains_by_count(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-    """Get email count by sender domain, limited to top domains."""
-    stats_query = """
-    with domain_counts as (
-        select
-            regexp_extract(from_email, '@([^>]+)') as domain,
-            count(*) as count
-        from emails
-        where from_email is not null
-        group by domain
-        order by count desc
-        limit 10
-    )
-    select domain, count from domain_counts
-    """
-    results = db.execute(stats_query).df()
-    return results
-
-
-def get_thread_for_email(db: duckdb.DuckDBPyConnection, email_id: str) -> pd.DataFrame:
-    email_from_db = get_one_email(db, email_id)
-    if not email_from_db.empty:
-        email_dict = email_from_db.to_dict(orient="records")[0]
-        thread_id_val = email_dict.get("thread_id")
-        if isinstance(thread_id_val, str):
-            return get_one_thread(db, thread_id_val)
-    return pd.DataFrame()
-
-
-def get_one_thread(db: duckdb.DuckDBPyConnection, thread_id: str) -> pd.DataFrame:
-    rel = db.execute("select * from emails where thread_id == ?", [thread_id])
-    return rel.df()
-
-
-def get_email_count(
-    db: duckdb.DuckDBPyConnection, additional_criteria: Optional[Dict[str, str]] = None
-) -> int:
-    if additional_criteria:
-        additional_conditions, where_statements = process_additional_criteria(
-            additional_criteria
-        )
-        if where_statements:
-            where_statement = " AND ".join(where_statements)
-            rel = db.execute(
-                f"with conditional_selection as (select * from emails where {where_statement} order by date desc)"
-                f"select count(distinct message_id) as email_count from conditional_selection",
-                additional_conditions,
-            )
-        else:
-            rel = db.execute(
-                "select count(distinct message_id) as email_count from emails"
-            )
-    else:
-        rel = db.execute("select count(distinct message_id) as email_count from emails")
-    df = rel.df()
-    if not df.empty:
-        return int(df.email_count.values[0])
-    else:
-        return 0
-
-
-def get_attachment_file(
-    db: duckdb.DuckDBPyConnection, email_id: str, attachment_name: str
-) -> Dict[str, Union[str, bytes, int]]:
-    email_data_list = get_one_email(db, email_id=email_id).to_dict(orient="records")
-    if isinstance(email_data_list, list) and email_data_list:
-        email_data = email_data_list[0]
-        email_raw_string = get_string_email_from_mboxfile(
-            email_data.get("email_start"), email_data.get("email_end")
-        )
-        attachments = parse_email(email_raw_string).get("attachments")
-        for a in attachments:  # type: ignore[union-attr]
-            if attachment_name == a.get("filename"):  # type: ignore[union-attr]
-                return a  # type: ignore[return-value]
-    return {}
-
-
-def _extract_attachments(msg: Message) -> List[Dict[str, Union[str, bytes, int]]]:
-    """
-    Internal function to iterate and extract all attachment parts.
-    Returns the full decoded binary content in the 'content' field.
-    """
-    attachments: List[Dict[str, Union[str, bytes, int]]] = []
-
-    # Iterate through all parts of the email
+def _iter_body_parts(msg: Message) -> Iterator[Tuple[str, str]]:
+    """Yield (content_type, decoded_text) for every inline text part."""
     for i, part in enumerate(msg.walk()):
-        # Skip container parts
-        if part.is_multipart():
+        if part.is_multipart() or _is_attachment_part(part):
             continue
-
+        if part.get_content_maintype() != "text":
+            continue
         content_type = part.get_content_type()
-        filename = part.get_filename()
-        content_disposition = part.get("Content-Disposition")
-
-        # An attachment is typically identified by a filename OR a Content-Disposition: attachment
-        is_attachment = filename or (
-            content_disposition and content_disposition.startswith("attachment")
-        )
-
-        if is_attachment:
-            logger.debug(
-                f"[{i:02d}] Identified attachment: {filename} ({content_type})"
-            )
-
-            try:
-                # get_payload(decode=True) extracts the raw, decoded binary content
-                payload_raw = part.get_payload(decode=True)
-                if payload_raw is None:
-                    payload = b"[Empty attachment content]"
-                elif isinstance(payload_raw, bytes):
-                    payload = payload_raw
-                else:
-                    payload = str(payload_raw).encode("utf-8")
-            except Exception as e:
-                logger.error(f"Error decoding attachment content for {filename}: {e}")
-                payload = f"[Error decoding attachment content: {e}]".encode("utf-8")
-
-            # Truncate content for a clean preview (for logging/summary)
-            content_preview = payload[:50]
-
-            attachments.append(
-                {
-                    "filename": filename or "Untitled",
-                    "content_type": content_type,
-                    "size_bytes": len(payload),
-                    "content": payload,  # Returns the full binary content
-                    "content_preview": content_preview,  # A small preview for easy viewing
-                }
-            )
-
-    return attachments
+        try:
+            content = part.get_content()  # type: ignore[attr-defined]
+            if not isinstance(content, str):
+                content = to_string(content)
+        except Exception as e:
+            # Unknown or wrong charsets are common in old mail; fall back to raw bytes.
+            logger.debug("Part %d (%s) failed to decode: %s", i, content_type, e)
+            payload = part.get_payload(decode=True)
+            content = to_string(payload) if isinstance(payload, bytes) else ""
+        yield content_type, content
 
 
 def _extract_body_content(msg: Message) -> Tuple[str, Optional[str]]:
     """
-    Internal function to extract and prioritize HTML or plain text body.
-    Priority: HTML > Plain Text.
-    Returns: A tuple (body_type, body_content_string)
+    Pick the body to display: the last HTML part, else the first plain-text part.
+    Returns (body_type, content) where body_type is "HTML", "Plain Text" or "None".
     """
-    email_body_html: Optional[str] = None
-    email_body_text: Optional[str] = None
+    html_body: Optional[str] = None
+    text_body: Optional[str] = None
+    for content_type, content in _iter_body_parts(msg):
+        if content_type == "text/html":
+            html_body = content
+        elif content_type == "text/plain" and text_body is None:
+            text_body = content
+    if html_body:
+        return ("HTML", html_body)
+    if text_body:
+        return ("Plain Text", text_body)
+    return ("None", None)
 
-    for i, part in enumerate(msg.walk()):
-        # Skip container parts or parts clearly identified as attachments
-        content_disposition = part.get("Content-Disposition")
-        if (
-            part.is_multipart()
-            or part.get_filename()
-            or (
-                content_disposition is not None
-                and content_disposition.startswith("attachment")
-            )
-        ):
+
+def extract_index_text(msg: Message) -> str:
+    """Text used for search and embeddings: plain part preferred over HTML."""
+    html_body: Optional[str] = None
+    for content_type, content in _iter_body_parts(msg):
+        if content_type == "text/plain" and content.strip():
+            return normalize_whitespace(content)
+        if content_type == "text/html" and html_body is None:
+            html_body = content
+    return html_to_text(html_body) if html_body else ""
+
+
+def _extract_attachments(
+    msg: Message, include_content: bool = True
+) -> List[Dict[str, Any]]:
+    """List attachment parts; the decoded bytes are included only on request."""
+    attachments: List[Dict[str, Any]] = []
+    for part in msg.walk():
+        if part.is_multipart() or not _is_attachment_part(part):
             continue
-
-        content_type = part.get_content_type()
-        main_type = part.get_content_maintype()
-
-        is_body_part = main_type == "text"
-
-        if is_body_part:
-            try:
-                # .get_content() automatically decodes the payload into a string
-                content_raw = part.get_content()  # type: ignore[attr-defined]
-                if isinstance(content_raw, str):
-                    content = content_raw
-                else:
-                    content = str(content_raw)
-            except Exception as e:
-                logger.error(
-                    f"Error decoding body content (Part {i:02d}, Type {content_type}): {e}"
-                )
-                content = f"[Error decoding body content: {e}]"
-
-            if content_type == "text/html":
-                email_body_html = content
-                logger.debug(f"[{i:02d}] Stored HTML Body.")
-            elif content_type == "text/plain":
-                # Only store if not already set, in case of multiple plain parts
-                if email_body_text is None:
-                    email_body_text = content
-                logger.debug(f"[{i:02d}] Stored Plain Text Body.")
-
-    # 5. Determine which body to show (HTML first, then Plain Text)
-    if email_body_html:
-        logger.info("Prioritizing HTML body content.")
-        return ("HTML", email_body_html)
-    elif email_body_text:
-        logger.info("Falling back to Plain Text body content.")
-        return ("Plain Text", email_body_text)
-    else:
-        logger.info("No recognizable body content found.")
-        return ("None", None)
+        filename = part.get_filename()
+        try:
+            payload = part.get_payload(decode=True)
+            if not isinstance(payload, bytes):
+                payload = b"" if payload is None else str(payload).encode("utf-8")
+        except Exception as e:
+            logger.error("Error decoding attachment %s: %s", filename, e)
+            payload = b""
+        attachment: Dict[str, Any] = {
+            "filename": filename or "Untitled",
+            "content_type": part.get_content_type(),
+            "size_bytes": len(payload),
+            "content_id": _content_id(part),
+        }
+        if include_content:
+            attachment["content"] = payload
+        attachments.append(attachment)
+    return attachments
 
 
-# --- Main Library Function ---
+def _content_id(part: Message) -> Optional[str]:
+    cid = part.get("Content-ID")
+    return str(cid).strip().strip("<>") if cid else None
+
+
+def _extract_inline_images(msg: Message) -> Dict[str, Tuple[str, bytes]]:
+    """Map Content-ID -> (mime type, bytes) for images referenced as cid: URLs."""
+    images: Dict[str, Tuple[str, bytes]] = {}
+    for part in msg.walk():
+        if part.is_multipart() or part.get_content_maintype() != "image":
+            continue
+        cid = _content_id(part)
+        if not cid:
+            continue
+        payload = part.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            images[cid] = (part.get_content_type(), payload)
+    return images
 
 
 def parse_email(
-    raw_email: bytes,
-) -> Dict[
-    str, Union[Tuple[str, Optional[str]], List[Dict[str, Union[str, bytes, int]]]]
-]:
+    raw_email: bytes, include_attachment_content: bool = True
+) -> Dict[str, Any]:
     """
-    Parses a raw email string to extract prioritized body content and all attachments.
+    Parse a raw message into its display body, attachments and inline images.
 
-    Args:
-        raw_email_string: The complete raw content of an email message.
-
-    Returns:
-        A dictionary containing:
-        - 'body': A tuple (body_type, body_content_string or None)
-        - 'attachments': A list of attachment dictionaries.
+    Returns a dict with:
+    - 'body': (body_type, content or None)
+    - 'attachments': list of {filename, content_type, size_bytes, content_id[, content]}
+    - 'inline_images': {content_id: (mime_type, bytes)}
     """
-
-    logger.info("Starting email parsing process...")
-
-    # 1. Convert string to bytes and parse the email message
     try:
         msg = BytesParser(policy=default).parsebytes(raw_email)
     except Exception as e:
-        logger.error(f"Failed to parse raw email string: {e}")
-        return {"body": ("Error", f"Parsing failed: {e}"), "attachments": []}
+        logger.error("Failed to parse raw email: %s", e)
+        return {"body": ("Error", f"Parsing failed: {e}"), "attachments": [], "inline_images": {}}
 
-    # 2. Extract content using dedicated functions
-    body_info = _extract_body_content(msg)
-    attachments_list = _extract_attachments(msg)
-
-    logger.info(f"Finished parsing. Found {len(attachments_list)} attachments.")
-
-    return {"body": body_info, "attachments": attachments_list}
+    return {
+        "body": _extract_body_content(msg),
+        "attachments": _extract_attachments(msg, include_attachment_content),
+        "inline_images": _extract_inline_images(msg),
+    }
 
 
-def load_and_parse_email(
-    email: Email,
-) -> Dict[
-    str, Union[Tuple[str, Optional[str]], List[Dict[str, Union[str, bytes, int]]]]
-]:
-    """
-    Load and parse email from mbox file given Email dataclass.
-
-    Args:
-        email: Email dataclass with email_start and email_end
-
-    Returns:
-        Parsed email dictionary with 'body' and 'attachments'
-    """
-    email_raw = get_string_email_from_mboxfile(email.email_start, email.email_end)
-    return parse_email(email_raw)
+def load_and_parse_email(email_meta: Email, include_attachment_content: bool = False) -> Dict[str, Any]:
+    raw = read_mbox_slice(email_meta.email_start, email_meta.email_end)
+    return parse_email(raw, include_attachment_content)
 
 
-@lru_cache(maxsize=512)
-def get_string_email_from_mboxfile(email_start: int, email_end: int) -> bytes:
-    if mboxfilename is None:
-        raise ValueError(
-            "MBOX_FILE_PATH environment variable must be set to use this function"
+# ---------------------------------------------------------------------------
+# Database access
+# ---------------------------------------------------------------------------
+
+
+def load_email_db(db_name: Optional[str] = None) -> duckdb.DuckDBPyConnection:
+    return duckdb.connect(db_name or get_db_path(), read_only=True)
+
+
+def get_one_email(db: duckdb.DuckDBPyConnection, email_id: str) -> pd.DataFrame:
+    return db.execute("select * from emails where message_id = ? limit 1", [email_id]).df()
+
+
+def get_one_thread(db: duckdb.DuckDBPyConnection, thread_id: str) -> pd.DataFrame:
+    """Emails in a thread, oldest first. An empty id is not a thread."""
+    if not thread_id:
+        return pd.DataFrame()
+    return db.execute(
+        "select * from emails where thread_id = ? order by date asc", [thread_id]
+    ).df()
+
+
+def get_basic_stats(db: duckdb.DuckDBPyConnection) -> List[pd.DataFrame]:
+    row = db.execute(
+        "select count(*) as all_emails, avg(email_end - email_start) as avg_size,"
+        " min(date) as first_seen, max(date) as last_seen from emails"
+    ).df()
+    return [row[["all_emails"]], row[["avg_size"]], row[["first_seen", "last_seen"]]]
+
+
+def get_email_sizes_in_time(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Cumulative archive size (bytes) per month."""
+    return db.execute(
+        """
+        select month as date, sum(size) over (order by month) as count
+        from (
+            select date_trunc('month', date) as month, sum(email_end - email_start) as size
+            from emails where date is not null group by month
         )
-    with open(mboxfilename, "rb") as infile:
-        infile.seek(email_start)
-        data = infile.read(email_end - email_start)
-        return data
+        order by month
+        """
+    ).df()
 
 
-def surround_with_wildcards(input: str) -> str:
-    return f"%{input}%"
+def get_domains_by_count(db: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """Top 10 sender domains by message count."""
+    return db.execute(
+        """
+        select lower(regexp_extract(from_email, '@([^>\\s]+)', 1)) as domain, count(*) as count
+        from emails
+        where from_email is not null
+        group by domain
+        having domain != ''
+        order by count desc
+        limit 10
+        """
+    ).df()
 
 
-def process_additional_criteria(
-    additional_criteria: Optional[Dict[str, str]],
-) -> Tuple[List[str], List[str]]:
-    additional_conditions = []
-    where_statements = []
-    if additional_criteria:
-        # Email address filter
-        if "from" in additional_criteria:
-            where_statements.append("from_email like ?")
-            additional_conditions.append(
-                surround_with_wildcards(additional_criteria["from"])
-            )
-        if "subject" in additional_criteria:
-            where_statements.append("subject like ?")
-            additional_conditions.append(
-                surround_with_wildcards(additional_criteria["subject"])
-            )
-        if "label" in additional_criteria:
-            where_statements.append("? in labels")
-            additional_conditions.append(additional_criteria["label"])
-        else:
-            if excerpt := additional_criteria.get("excerpt"):
-                where_statements.append("excerpt like ?")
-                additional_conditions.append(surround_with_wildcards(excerpt))
+def _has_column(db: duckdb.DuckDBPyConnection, table: str, column: str) -> bool:
+    rows = db.execute(
+        "select 1 from information_schema.columns where table_name = ? and column_name = ?",
+        [table, column],
+    ).fetchall()
+    return bool(rows)
 
-        # Date range filters
-        if "from_date" in additional_criteria and additional_criteria["from_date"]:
-            where_statements.append("date >= ?")
-            additional_conditions.append(additional_criteria["from_date"])
 
-        if "to_date" in additional_criteria and additional_criteria["to_date"]:
-            where_statements.append("date <= ?")
-            additional_conditions.append(additional_criteria["to_date"])
-    return additional_conditions, where_statements
+def _parse_iso_date(value: str, key: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise InvalidQueryError(f"{key} must be a date in YYYY-MM-DD format, got {value!r}")
+
+
+def build_email_filter(
+    criteria: Optional[Mapping[str, str]],
+    sent: bool = False,
+    keyword_column: str = "excerpt",
+) -> Tuple[str, List[Any]]:
+    """
+    Translate parsed search criteria into a WHERE clause and its parameters.
+    All filters combine with AND; text matches are case-insensitive substrings.
+    """
+    clauses: List[str] = []
+    params: List[Any] = []
+    criteria = criteria or {}
+
+    if value := criteria.get("from"):
+        clauses.append("from_email ilike ?")
+        params.append(f"%{value}%")
+    if value := criteria.get("subject"):
+        clauses.append("subject ilike ?")
+        params.append(f"%{value}%")
+    if value := criteria.get("label"):
+        clauses.append("list_contains(labels, ?)")
+        params.append(value)
+    if value := criteria.get("excerpt"):
+        clauses.append(f"(subject ilike ? or {keyword_column} ilike ?)")
+        params.extend([f"%{value}%", f"%{value}%"])
+    if value := criteria.get("from_date"):
+        clauses.append("date >= ?")
+        params.append(_parse_iso_date(value, "from_date"))
+    if value := criteria.get("to_date"):
+        # to_date is inclusive of the whole day
+        clauses.append("date < ?")
+        params.append(_parse_iso_date(value, "to_date") + timedelta(days=1))
+    if sent:
+        clauses.append("list_contains(labels, 'Sent')")
+
+    return (" and ".join(clauses) or "true"), params
+
+
+def _search_sql(
+    db: duckdb.DuckDBPyConnection,
+    select: str,
+    criteria: Optional[Mapping[str, str]],
+    sent: bool,
+    query_vec: Optional[Sequence[float]],
+) -> Tuple[str, List[Any]]:
+    keyword_column = (
+        "coalesce(body_text, excerpt)" if _has_column(db, "emails", "body_text") else "excerpt"
+    )
+    where, params = build_email_filter(criteria, sent, keyword_column)
+    if query_vec is None:
+        return f"select {select} from emails where {where}", params
+
+    dim = len(query_vec)
+    sql = f"""
+        with scored as (
+            select message_id, min(array_cosine_distance(vec, ?::FLOAT[{dim}])) as dist
+            from embeddings where vec is not null
+            group by message_id
+        )
+        select {select} from emails join scored using (message_id)
+        where scored.dist < ? and {where}
+    """
+    return sql, [list(query_vec), RAG_MAX_DISTANCE] + params
 
 
 def get_email_list(
     db: duckdb.DuckDBPyConnection,
-    criteria: Optional[Dict[str, int]] = None,
-    additional_criteria: Optional[Dict[str, str]] = None,
+    limit: int = 30,
+    offset: int = 0,
+    criteria: Optional[Mapping[str, str]] = None,
     sent: bool = False,
-    rag_message_ids: Optional[List[str]] = None,
+    query_vec: Optional[Sequence[float]] = None,
 ) -> pd.DataFrame:
     """
-    Get email list with optional filtering.
-
-    Args:
-        db: DuckDB connection
-        criteria: Dict with 'limit' and 'offset' for pagination
-        additional_criteria: Dict with search filters (from, subject, excerpt, from_date, to_date)
-        sent: Boolean to filter for sent emails
-        rag_message_ids: List of message IDs from RAG search to filter by
+    One page of emails matching the filters. With ``query_vec`` the results are
+    semantic-search hits ordered by distance (``dist`` column), otherwise newest first.
     """
-    if not criteria:
-        rel = db.sql("select * from emails order by date desc limit 30")
-        return rel.df()
-    else:
-        if "limit" in criteria and "offset" in criteria:
-            additional_conditions, where_statements = process_additional_criteria(
-                additional_criteria
-            )
-            # Sent folder filter
-            if sent:
-                where_statements.append("? IN labels")
-                additional_conditions.append("Sent")
-
-            # RAG search results filter
-            if rag_message_ids:
-                # Create placeholders for the IN clause
-                placeholders = ",".join(["?" for _ in rag_message_ids])
-                where_statements.append(f"message_id IN ({placeholders})")
-                additional_conditions.extend(rag_message_ids)
-
-            # Execute query
-            if where_statements:
-                where_statement = " AND ".join(where_statements)
-                db.execute(
-                    f"select * from emails where {where_statement} order by date desc limit ? offset ?",
-                    additional_conditions + [criteria["limit"], criteria["offset"]],
-                )
-            else:
-                db.execute(
-                    "select * from emails order by date desc limit ? offset ?",
-                    [criteria["limit"], criteria["offset"]],
-                )
-        else:
-            db.execute("select * from emails order by date desc limit 1")
-        return db.df()
+    select = "emails.*" if query_vec is None else "emails.*, scored.dist"
+    sql, params = _search_sql(db, select, criteria, sent, query_vec)
+    order = "date desc" if query_vec is None else "scored.dist asc"
+    return db.execute(f"{sql} order by {order} limit ? offset ?", params + [limit, offset]).df()
 
 
-def load_email_content_search(
+def get_email_count(
     db: duckdb.DuckDBPyConnection,
-) -> duckdb.DuckDBPyConnection:
-    """
-    Initialize DuckDB for vector search by installing and loading VSS extension.
+    criteria: Optional[Mapping[str, str]] = None,
+    sent: bool = False,
+    query_vec: Optional[Sequence[float]] = None,
+) -> int:
+    sql, params = _search_sql(db, "count(*)", criteria, sent, query_vec)
+    row = db.execute(sql, params).fetchone()
+    return int(row[0]) if row else 0
 
-    Args:
-        db: DuckDB connection
 
-    Returns:
-        The same db connection with VSS loaded
+# ---------------------------------------------------------------------------
+# Embeddings
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EmbeddingConfig:
+    model: str
+    dim: Optional[int]
+    query_prefix: str
+    document_prefix: str
+
+
+def _prefixes_for(model: str) -> Tuple[str, str]:
+    return MODEL_PREFIXES.get(model.split(":")[0], ("", ""))
+
+
+def get_embedding_config(db: duckdb.DuckDBPyConnection) -> EmbeddingConfig:
     """
+    The embedding settings the index was built with. Queries must use the same
+    model and prefixes, so these take precedence over OLLAMA_MODEL.
+    """
+    meta: Dict[str, str] = {}
+    if _table_exists(db, "index_meta"):
+        meta = dict(db.execute("select key, value from index_meta").fetchall())
+
+    model = meta.get("embedding_model") or os.getenv("OLLAMA_MODEL") or DEFAULT_EMBEDDING_MODEL
+    query_prefix, document_prefix = _prefixes_for(model)
+    dim: Optional[int] = int(meta["embedding_dim"]) if "embedding_dim" in meta else None
+    if dim is None and _table_exists(db, "embeddings"):
+        row = db.execute(
+            "select data_type from information_schema.columns"
+            " where table_name = 'embeddings' and column_name = 'vec'"
+        ).fetchone()
+        match = re.search(r"\[(\d+)\]", row[0]) if row else None
+        dim = int(match.group(1)) if match else None
+    return EmbeddingConfig(
+        model=model,
+        dim=dim,
+        query_prefix=meta.get("query_prefix", query_prefix),
+        document_prefix=meta.get("document_prefix", document_prefix),
+    )
+
+
+def _table_exists(db: duckdb.DuckDBPyConnection, table: str) -> bool:
+    rows = db.execute(
+        "select 1 from information_schema.tables where table_name = ?", [table]
+    ).fetchall()
+    return bool(rows)
+
+
+def get_ollama_embeddings(
+    texts: Sequence[str],
+    model: Optional[str] = None,
+    server_url: Optional[str] = None,
+    timeout: float = 120,
+) -> Optional[List[List[float]]]:
+    """Embed a batch of texts with one Ollama call. Returns None on failure."""
+    server_url = server_url or os.getenv("OLLAMA_URL") or DEFAULT_OLLAMA_URL
+    model = model or os.getenv("OLLAMA_MODEL") or DEFAULT_EMBEDDING_MODEL
     try:
-        # Install and load the VSS extension for vector similarity search
-        db.execute("INSTALL vss;")
-        db.execute("LOAD vss;")
-        logger.info("DuckDB VSS extension loaded successfully")
-    except Exception as e:
-        logger.warning(f"VSS extension may already be installed: {e}")
-
-    return db
+        response = requests.post(
+            server_url, json={"model": model, "input": list(texts)}, timeout=timeout
+        )
+    except requests.RequestException as e:
+        logger.error("Failed to reach Ollama at %s: %s", server_url, e)
+        return None
+    if response.status_code != 200:
+        logger.error("Ollama embedding failed with status %s: %s", response.status_code, response.text[:200])
+        return None
+    embeddings = response.json().get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+        logger.error("Unexpected Ollama response: expected %d embeddings", len(texts))
+        return None
+    return embeddings
 
 
 def get_ollama_embedding(
     text: str, server_url: Optional[str] = None, model: Optional[str] = None
 ) -> Optional[List[float]]:
-    """
-    Get embedding vector from Ollama server.
+    result = get_ollama_embeddings([text], model=model, server_url=server_url, timeout=30)
+    return result[0] if result else None
 
-    Args:
-        text: Text to embed
-        server_url: Ollama API endpoint (defaults to OLLAMA_URL env var or http://localhost:11434/api/embed)
-        model: Embedding model to use (defaults to OLLAMA_MODEL env var or nomic-embed-text)
 
-    Returns:
-        List of floats representing the embedding vector, or None on failure
-    """
-    import requests
-
-    # Get configuration from environment variables if not provided
-    if server_url is None:
-        server_url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/embed")
-    if model is None:
-        model = os.getenv("OLLAMA_MODEL", "embeddinggemma")
-
+def pull_ollama_model(model: str, server_url: Optional[str] = None) -> bool:
+    """Ask Ollama to download ``model``; blocks until done. Returns success."""
+    server_url = server_url or os.getenv("OLLAMA_URL") or DEFAULT_OLLAMA_URL
+    pull_url = server_url.split("/api/", 1)[0] + "/api/pull"
+    logger.info("Embedding model '%s' unavailable; trying to pull it via %s", model, pull_url)
     try:
-        response = requests.post(
-            server_url, json={"model": model, "input": text}, timeout=30
+        response = requests.post(pull_url, json={"model": model, "stream": False}, timeout=3600)
+    except requests.RequestException as e:
+        logger.error("Failed to pull '%s': %s", model, e)
+        return False
+    if response.status_code != 200:
+        logger.error("Pulling '%s' failed with status %s: %s", model, response.status_code, response.text[:200])
+        return False
+    return True
+
+
+def embed_query(db: duckdb.DuckDBPyConnection, query_text: str) -> List[float]:
+    """Embed a search query with the index's model; raises RagUnavailableError."""
+    config = get_embedding_config(db)
+    if config.dim is None:
+        raise RagUnavailableError(
+            "Semantic search is unavailable: the index has no embeddings "
+            "(it was built without them; re-run `python email_utils.py index` with Ollama available)"
         )
-        if response.status_code == 200:
-            result = response.json()
-            # Ollama returns embeddings in different formats depending on version
-            if "embeddings" in result:
-                emb = (
-                    result["embeddings"][0]
-                    if isinstance(result["embeddings"], list)
-                    else result["embeddings"]
-                )
-                return emb  # type: ignore[no-any-return]
-            elif "embedding" in result:
-                return result["embedding"]  # type: ignore[no-any-return]
-            else:
-                logger.error(f"Unexpected Ollama response format: {result.keys()}")
-                return None
-        else:
-            logger.error(f"Ollama embedding failed with status {response.status_code}")
-            return None
-    except Exception as e:
-        logger.error(f"Failed to get embedding from Ollama: {e}")
-        return None
-
-
-# Global constants for RAG search embedding
-query_prefix = "task: search result | query: "
-document_prefix = "title: none | text: "
+    vec = get_ollama_embedding(config.query_prefix + query_text, model=config.model)
+    if not vec:
+        raise RagUnavailableError(
+            f"Semantic search is unavailable: could not embed the query with "
+            f"'{config.model}' (is Ollama running at {os.getenv('OLLAMA_URL', DEFAULT_OLLAMA_URL)}?)"
+        )
+    if config.dim is not None and len(vec) != config.dim:
+        raise RagUnavailableError(
+            f"Embedding model '{config.model}' returned {len(vec)} dimensions but the "
+            f"index was built with {config.dim}; rebuild the index or change OLLAMA_MODEL"
+        )
+    return vec
 
 
 def rag_search_duckdb(
     db: duckdb.DuckDBPyConnection, query_text: str, n_results: int = 50
 ) -> pd.DataFrame:
-    """
-    Perform semantic search using DuckDB's VSS extension with cosine distance.
-
-    Args:
-        db: DuckDB connection with VSS loaded
-        query_text: The search query text
-        n_results: Number of results to return (default 50)
-
-    Returns:
-        List of message IDs from semantically similar emails
-    """
-    try:
-        if not query_text:
-            return pd.DataFrame()
-
-        # Get embedding for the query (uses OLLAMA_URL env var)
-        query_vec = get_ollama_embedding(query_prefix + query_text)
-
-        if not query_vec:
-            logger.warning("Failed to generate embedding for RAG search")
-            return pd.DataFrame()
-
-        # Perform vector similarity search using array_cosine_distance
-        # Lower distance = more similar (0 = identical, 2 = opposite)
-        rel = db.execute(
-            """
-            with dists as (
-                SELECT message_id, array_cosine_distance(vec, ?::FLOAT[768]) as dist
-                FROM embeddings
-                ORDER BY dist ASC
-                LIMIT ?
-            )
-            select emails.message_id, subject, dists.dist
-            from emails join
-            dists on dists.message_id == emails.message_id 
-            where dist < 0.5
-            order by dist asc
-        """,
-            [query_vec, n_results],
-        )
-
-        results = rel.df()
-        logger.info(
-            f"RAG search for '{query_text}' returned {results.shape[0]} results"
-        )
-
-        return results
-
-    except Exception as e:
-        logger.error(f"RAG search failed: {e}")
+    """Semantic search returning message_id, subject and dist, closest first."""
+    if not query_text:
         return pd.DataFrame()
+    vec = embed_query(db, query_text)
+    return get_email_list(db, limit=n_results, query_vec=vec)[["message_id", "subject", "dist"]]
 
 
-def process(drop_previous_table: bool = False) -> None:
-    if mboxfilename is None:
-        raise ValueError(
-            "MBOX_FILE_PATH environment variable must be set to use this function"
+def chunk_text(
+    text: str,
+    max_chars: int = CHUNK_CHARS,
+    overlap: int = CHUNK_OVERLAP_CHARS,
+    max_chunks: int = MAX_CHUNKS_PER_EMAIL,
+) -> List[str]:
+    """Split text into overlapping chunks, breaking on whitespace where possible."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks: List[str] = []
+    start = 0
+    while start < len(text) and len(chunks) < max_chunks:
+        end = min(start + max_chars, len(text))
+        if end < len(text):
+            space = text.rfind(" ", start + max_chars // 2, end)
+            newline = text.rfind("\n", start + max_chars // 2, end)
+            end = max(space, newline) if max(space, newline) > start else end
+        chunks.append(text[start:end].strip())
+        if end >= len(text):
+            break
+        start = max(end - overlap, start + 1)
+    return [c for c in chunks if c]
+
+
+# ---------------------------------------------------------------------------
+# Indexing
+# ---------------------------------------------------------------------------
+
+EMAILS_DDL = """
+create table if not exists emails (
+    message_id text primary key,
+    subject text,
+    from_email text,
+    to_email text,
+    date timestamp,
+    has_attachment integer,
+    excerpt text,
+    body_text text,
+    labels text[],
+    content_type text,
+    mbox_file_id text,
+    email_start bigint,
+    email_end bigint,
+    thread_id text
+)
+"""
+
+INDEX_META_DDL = "create table if not exists index_meta (key text primary key, value text)"
+
+
+def _embeddings_ddl(dim: int) -> str:
+    return f"""
+    create table if not exists embeddings (
+        message_id text,
+        chunk_index integer,
+        mbox_file_id text,
+        vec FLOAT[{dim}],
+        primary key (message_id, chunk_index)
+    )
+    """
+
+
+def _file_sha256(path: str) -> str:
+    sha = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            sha.update(block)
+    return sha.hexdigest()
+
+
+def _parse_date(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    parsed: Optional[datetime]
+    try:
+        parsed = email.utils.parsedate_to_datetime(str(value))
+    except (TypeError, ValueError):
+        from dateparser import parse
+
+        parsed = parse(str(value))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _header(message: Message, name: str) -> str:
+    value = message.get(name)
+    return str(value).strip() if value is not None else ""
+
+
+def _email_row(
+    message: Message, message_id: str, text: str, mbox_file_id: str, boundaries: Tuple[int, int]
+) -> List[Any]:
+    labels_header = _header(message, "X-Gmail-Labels")
+    return [
+        message_id,
+        _header(message, "Subject"),
+        _header(message, "From"),
+        _header(message, "To"),
+        _parse_date(message.get("Date")),
+        sum(1 for part in message.walk() if not part.is_multipart() and _is_attachment_part(part)),
+        " ".join(text.split())[:EXCERPT_CHARS],
+        text[:BODY_TEXT_MAX_CHARS],
+        [label.strip() for label in labels_header.split(",") if label.strip()],
+        _header(message, "Content-Type") or None,
+        mbox_file_id,
+        boundaries[0],
+        boundaries[1],
+        _header(message, "X-GM-THRID"),
+    ]
+
+
+def _check_schema(con: duckdb.DuckDBPyConnection) -> None:
+    if _table_exists(con, "emails") and not _has_column(con, "emails", "body_text"):
+        raise RuntimeError(
+            "The database uses the old schema. Run `python email_utils.py migrate` "
+            "or `python email_utils.py index --rebuild`."
         )
 
-    # imports
-    from hashlib import sha256
 
-    import chromadb
-    import duckdb
-    import numpy as np
+def check_index_freshness(
+    db: duckdb.DuckDBPyConnection, mbox_path: str, samples: int = 16
+) -> Optional[str]:
+    """
+    Check that the byte offsets stored in the index still point at the same
+    messages. Appending to the mbox keeps the index valid; replacing it (e.g.
+    with a new Google Takeout export) does not. Returns None when the index
+    matches, otherwise what is wrong. Only a handful of messages are read, so
+    this is cheap even for a large mbox on network storage.
+    """
+    if not _table_exists(db, "emails"):
+        return None
+    row = db.execute("select max(email_end) from emails").fetchone()
+    if not row or row[0] is None:
+        return None
+    indexed_end = int(row[0])
+    size = os.path.getsize(mbox_path)
+    if size < indexed_end:
+        return f"the mbox is {size} bytes but the index refers to byte {indexed_end}"
+
+    rows = db.execute(
+        """
+        select message_id, email_start, email_end from emails
+        where email_start = (select min(email_start) from emails)
+           or email_end = (select max(email_end) from emails)
+           or message_id in (select message_id from emails order by hash(message_id) limit ?)
+        """,
+        [samples],
+    ).fetchall()
+    with open(mbox_path, "rb") as f:
+        for message_id, start, end in rows:
+            f.seek(int(start))
+            head = f.read(min(int(end) - int(start), 256 * 1024))
+            if not _is_from_line(head.split(b"\n", 1)[0]):
+                return f"no message starts at byte {start} (expected {message_id})"
+            headers = BytesParser(policy=default).parsebytes(head, headersonly=True)
+            if _header(headers, "Message-ID") != message_id:
+                return f"the message at byte {start} is not {message_id}"
+        if size > indexed_end:
+            f.seek(indexed_end)
+            if not _is_from_line(f.readline()):
+                return f"the data after byte {indexed_end} does not start a new message"
+    return None
+
+
+def build_index(
+    mbox_path: Optional[str] = None,
+    db_path: Optional[str] = None,
+    rebuild: bool = False,
+    model: Optional[str] = None,
+    batch_size: int = 32,
+    embeddings: Union[bool, str] = True,
+    rebuild_if_stale: bool = False,
+) -> Dict[str, int]:
+    """
+    Index the mbox into DuckDB in two passes: message metadata (no Ollama
+    needed), then embeddings for every message that does not have them yet.
+    Both passes pick up where a previous run stopped, and only the part of
+    the mbox after the last indexed message is read, so re-running against an
+    unchanged or appended-to mbox is cheap. Embedding failures abort the run
+    (everything committed so far is kept) instead of storing empty vectors.
+
+    ``embeddings`` is True, False, or "auto" to skip them (with a warning)
+    when Ollama cannot provide the model. If the mbox no longer matches the
+    stored offsets the run fails, or with ``rebuild_if_stale`` the index is
+    rebuilt from scratch.
+    """
+    mbox_path = mbox_path or get_mbox_path()
+    db_path = db_path or get_db_path()
+
+    stats = {
+        "indexed": 0,
+        "skipped_existing": 0,
+        "skipped_no_id": 0,
+        "embedded": 0,
+        "chunks": 0,
+        "resumed_at": 0,
+    }
+
+    with duckdb.connect(db_path) as con:
+        if not rebuild:
+            _check_schema(con)
+            problem = check_index_freshness(con, mbox_path)
+            if problem and not rebuild_if_stale:
+                raise RuntimeError(f"The index does not match the mbox ({problem}); use --rebuild")
+            if problem:
+                logger.warning("The index does not match the mbox (%s); rebuilding", problem)
+                rebuild = True
+        if rebuild:
+            for table in ("emails", "embeddings", "index_meta"):
+                con.execute(f"drop table if exists {table}")
+
+        con.execute(EMAILS_DDL)
+        con.execute(INDEX_META_DDL)
+        # Checked before reading the mbox so a missing model fails fast.
+        embedder = _prepare_embeddings(con, model, optional=embeddings == "auto") if embeddings else None
+        _index_messages(con, mbox_path, stats)
+        if embedder:
+            _embed_missing(con, embedder[0], embedder[1], batch_size, stats)
+        con.execute("checkpoint")
+
+    logger.info("Indexing finished: %s", stats)
+    return stats
+
+
+def _prepare_embeddings(
+    con: duckdb.DuckDBPyConnection, model: Optional[str], optional: bool = False
+) -> Optional[Tuple[str, str]]:
+    """
+    Validate the model against the index and create the table; returns (model,
+    document prefix), or None when Ollama is unavailable and ``optional``.
+    """
+    config = get_embedding_config(con)
+    model = model or config.model
+    if config.dim is not None and config.model != model:
+        raise RuntimeError(
+            f"Index was built with '{config.model}', not '{model}'; use --rebuild to switch models"
+        )
+    query_prefix, document_prefix = _prefixes_for(model)
+
+    probe_text = [document_prefix + "dimension probe"]
+    probe = get_ollama_embeddings(probe_text, model=model, timeout=60)
+    if not probe and pull_ollama_model(model):
+        probe = get_ollama_embeddings(probe_text, model=model, timeout=60)
+    if not probe:
+        message = f"Could not get an embedding from Ollama with model '{model}'"
+        if optional:
+            logger.warning("%s; indexing without embeddings (rag: search unavailable)", message)
+            return None
+        raise RuntimeError(f"{message} (use --embeddings off to index without semantic search)")
+    dim = len(probe[0])
+    if config.dim is not None and config.dim != dim:
+        raise RuntimeError(f"Model returns {dim}-d vectors but the index has {config.dim}-d; use --rebuild")
+
+    con.execute(_embeddings_ddl(dim))
+    con.executemany(
+        "insert or replace into index_meta values (?, ?)",
+        [
+            ["embedding_model", model],
+            ["embedding_dim", str(dim)],
+            ["query_prefix", query_prefix],
+            ["document_prefix", document_prefix],
+        ],
+    )
+    return model, document_prefix
+
+
+def _index_messages(con: duckdb.DuckDBPyConnection, mbox_path: str, stats: Dict[str, int]) -> None:
     import tqdm
-    from dateparser import parse
-    from sentence_transformers import CrossEncoder
 
-    # DBs initialization
-    # chroma_client = chromadb.Client()
-    chroma_client = chromadb.PersistentClient(path="emails.chromadb")
-    emails_collection = chroma_client.get_or_create_collection(name="emails")
+    row = con.execute("select max(email_end) from emails").fetchone()
+    resume_at = int(row[0]) if row and row[0] is not None else 0
+    stats["resumed_at"] = resume_at
+    if resume_at and resume_at >= os.path.getsize(mbox_path):
+        logger.info("No new messages in the mbox since the last run")
+        return
 
-    sha = sha256()
-    BUF_SIZE = 65536
-    with open(mboxfilename, "rb") as f:
-        while True:
-            data = f.read(BUF_SIZE)
-            if not data:
-                break
-            sha.update(data)
-    mbox_file_hash = sha.hexdigest()
-    logger.info("SHA256: %s", mbox_file_hash)
+    mbox_file_id = _file_sha256(mbox_path)
+    logger.info("mbox SHA256: %s", mbox_file_id)
+    seen = {r[0] for r in con.execute("select message_id from emails").fetchall()}
+    pending: List[List[Any]] = []
 
-    con = duckdb.connect("emails.db")
-    if drop_previous_table:
-        con.sql("drop table if exists emails")
-        con.sql("drop table if exists embeddings")
-        con.sql(
-            "create table embeddings"
-            " (id integer,"
-            "  mbox_file_id text,"
-            "  message_id text,"
-            "  vec FLOAT[768])"
+    def flush() -> None:
+        if not pending:
+            return
+        con.begin()
+        con.executemany(
+            "insert into emails (message_id, subject, from_email, to_email, date,"
+            " has_attachment, excerpt, body_text, labels, content_type, mbox_file_id,"
+            " email_start, email_end, thread_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            pending,
         )
-        con.sql(
-            "create table emails "
-            "(i integer,"
-            " line integer,"
-            " subject text,"
-            " excerpt text,"
-            " message_id text,"
-            " from_email text,"
-            " to_email text,"
-            " date datetime,"
-            " has_attachment integer,"
-            " labels text[],"
-            " content_type text,"
-            " mbox_file_id text,"
-            " email_start integer,"
-            " email_end integer,"
-            " thread_id text)"
-        )
-        con.close()
+        con.commit()
+        stats["indexed"] += len(pending)
+        pending.clear()
 
-    with duckdb.connect("emails.db") as con:
-        with MboxReader(mboxfilename) as mbox:
-            for message, boundaries in tqdm.tqdm(mbox):
-                # print(message['From'], message['To'], message['Subject'], message['Date'], len(list(message.iter_parts())), len(list(message.iter_attachments())))
-                content = ""
-                whole_text = ""
-                try:
-                    if len(list(message.iter_parts())) > 0:
-                        for part in message.iter_parts():
-                            current_content = to_string(part.get_content())
-                            content += current_content
-                    else:
-                        content = to_string(message.get_content())
-                    parsed = simple_json_from_html_string(content)
-                    whole_text = "\n".join([x["text"] for x in parsed["plain_text"]])
-                except Exception as e:
-                    logger.warning(f"Failed to parse email content: {e}")
-                    pass
-                if not message["Message-ID"]:
-                    continue
-                emails_collection.add(
-                    ids=[message["Message-ID"]], documents=[whole_text]
-                )
-                # the content should be chunked into ~ 500 tokens
-                # Use None to let function read from environment variables
-                d_encoded = get_ollama_embedding(
-                    document_prefix + whole_text,
-                    None,  # Uses OLLAMA_URL env var
-                    None,  # Uses OLLAMA_MODEL env var
-                )
-                vector_to_insert = [message["Message-ID"], mbox_file_hash, d_encoded]
-                con.execute(
-                    f"""insert into embeddings 
-                                (message_id, mbox_file_id, vec) values (?, ?, ?)""",
-                    vector_to_insert,
-                )
-                data_to_insert = [
-                    message["From"],
-                    message["To"],
-                    message["Subject"],
-                    parse(message["Date"]),
-                    message["Message-ID"],
-                    len(list(message.iter_attachments())),
-                    whole_text[:30],
-                    message.get("X-Gmail-Labels", "").split(","),
-                    message.get("Content-Type"),
-                    mbox_file_hash,
-                    boundaries[0],
-                    boundaries[1],
-                    message.get("X-GM-THRID", ""),
-                ]
-                con.execute(
-                    f"""insert into emails 
-                (from_email,
-                 to_email,
-                 subject,
-                 date, 
-                 message_id, 
-                 has_attachment, 
-                 excerpt,
-                 labels,
-                 content_type,
-                 mbox_file_id,
-                 email_start,
-                 email_end,
-                 thread_id
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    data_to_insert[:13],
-                )
+    with MboxReader(mbox_path, start=resume_at) as mbox:
+        for message, boundaries in tqdm.tqdm(mbox, unit="email", desc="Reading mbox"):
+            message_id = _header(message, "Message-ID")
+            if not message_id:
+                stats["skipped_no_id"] += 1
+                continue
+            if message_id in seen:
+                stats["skipped_existing"] += 1
+                continue
+            seen.add(message_id)
 
-        # check that the DB has been filled in
-        res = con.sql(
-            "select subject, sum(has_attachment>0), count(*) as cnt from emails group by subject order by cnt desc limit 3"
-        )
+            try:
+                text = extract_index_text(message)
+            except Exception as e:
+                logger.warning("Failed to extract text from %s: %s", message_id, e)
+                text = ""
+            pending.append(_email_row(message, message_id, text, mbox_file_id, boundaries))
+            if len(pending) >= 500:
+                flush()
+    flush()
 
-        con.execute("INSTALL vss; LOAD vss")
-        con.execute("SET hnsw_enable_experimental_persistence = TRUE;")
+
+def _embed_missing(
+    con: duckdb.DuckDBPyConnection,
+    model: str,
+    document_prefix: str,
+    batch_size: int,
+    stats: Dict[str, int],
+) -> None:
+    """Embed every indexed message without embeddings, from the text stored in the index."""
+    import tqdm
+
+    missing = [
+        r[0]
+        for r in con.execute(
+            "select message_id from emails e where not exists"
+            " (select 1 from embeddings x where x.message_id = e.message_id) order by email_start"
+        ).fetchall()
+    ]
+    pending: List[Tuple[str, str, List[str]]] = []
+
+    def flush() -> None:
+        if not pending:
+            return
+        texts = [document_prefix + chunk for _, _, chunks in pending for chunk in chunks]
+        vectors = get_ollama_embeddings(texts, model=model)
+        if vectors is None:
+            raise RuntimeError(
+                "Embedding failed; progress so far is saved, re-run the index command to resume"
+            )
+        vec_iter = iter(vectors)
+        embedding_rows = [
+            [message_id, chunk_index, mbox_file_id, next(vec_iter)]
+            for message_id, mbox_file_id, chunks in pending
+            for chunk_index in range(len(chunks))
+        ]
+        con.begin()
+        con.executemany("insert into embeddings values (?, ?, ?, ?)", embedding_rows)
+        con.commit()
+        stats["embedded"] += len(pending)
+        stats["chunks"] += len(embedding_rows)
+        pending.clear()
+
+    with tqdm.tqdm(total=len(missing), unit="email", desc="Embedding") as progress:
+        for i in range(0, len(missing), 500):
+            rows = con.execute(
+                "select message_id, subject, body_text, mbox_file_id from emails"
+                " join (select unnest(?::text[]) as message_id) using (message_id)",
+                [missing[i : i + 500]],
+            ).fetchall()
+            for message_id, subject, body_text, mbox_file_id in rows:
+                text = body_text or ""
+                chunks = chunk_text(f"{subject}\n\n{text}" if subject else text)
+                if chunks:
+                    pending.append((message_id, mbox_file_id, chunks))
+                if sum(len(c) for _, _, c in pending) >= batch_size:
+                    flush()
+            progress.update(len(rows))
+    flush()
+
+
+def migrate_db(db_path: Optional[str] = None, model: Optional[str] = None) -> str:
+    """
+    Upgrade a database created before chunked embeddings: widen byte offsets
+    to BIGINT, drop the experimental HNSW index and unused columns, add the new
+    columns and record the embedding model. The result is written to a fresh
+    file (which also reclaims space); the original is kept as ``<db>.bak``.
+    """
+    db_path = db_path or get_db_path()
+    tmp_path = db_path + ".migrating"
+    backup_path = db_path + ".bak"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    with duckdb.connect(db_path, read_only=True) as source:
+        config = get_embedding_config(source)
+    model = model or config.model
+    if config.dim is None:
+        raise RuntimeError("No embeddings table found; nothing to migrate")
+
+    with duckdb.connect(tmp_path) as con:
+        escaped_path = db_path.replace("'", "''")
+        con.execute(f"attach '{escaped_path}' as old (read_only)")
+        con.execute(EMAILS_DDL)
         con.execute(
-            "CREATE INDEX cosine_idx ON embeddings USING HNSW (vec) WITH (metric = 'cosine')"
+            """
+            insert into emails
+            select message_id, subject, from_email, to_email, date, has_attachment,
+                   excerpt, null, labels, content_type, mbox_file_id,
+                   email_start::bigint, email_end::bigint, thread_id
+            from old.emails
+            where message_id is not null
+            qualify row_number() over (partition by message_id order by email_start) = 1
+            """
         )
+        con.execute(_embeddings_ddl(config.dim))
+        con.execute(
+            """
+            insert into embeddings
+            select message_id, 0, mbox_file_id, vec from old.embeddings
+            where message_id is not null and vec is not null
+            qualify row_number() over (partition by message_id) = 1
+            """
+        )
+        query_prefix, document_prefix = _prefixes_for(model)
+        con.execute(INDEX_META_DDL)
+        con.executemany(
+            "insert into index_meta values (?, ?)",
+            [
+                ["embedding_model", model],
+                ["embedding_dim", str(config.dim)],
+                ["query_prefix", query_prefix],
+                ["document_prefix", document_prefix],
+            ],
+        )
+        con.execute("detach old")
+        con.execute("checkpoint")
 
-    print(res.df())
-
-    def query_collection(
-        collection: chromadb.Collection, query: str
-    ) -> Dict[str, List[List[str]]]:
-        # Query the results
-        query = "vyrizena objednavka"
-        results = collection.query(query_texts=[query], n_results=2)
-        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512)
-        documents = results.get("documents")
-        if documents and len(documents) > 0 and documents[0]:
-            scores = model.predict([(query, doc) for doc in documents[0]])
-            print(documents[0][np.argmax(scores)])
-        return results  # type: ignore[return-value]
+    os.replace(db_path, backup_path)
+    os.replace(tmp_path, db_path)
+    return backup_path
 
 
 if __name__ == "__main__":
     import argparse
 
-    arguments = argparse.ArgumentParser()
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    parser = argparse.ArgumentParser(description="Build or upgrade the mbox search index.")
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    arguments.add_argument("delete_table", action="store_true")
+    env_embeddings = os.getenv("INDEX_EMBEDDINGS", "on").lower()
+    index_cmd = commands.add_parser("index", help="index new messages (resumable)")
+    index_cmd.add_argument("--rebuild", action="store_true", help="drop existing tables first")
+    index_cmd.add_argument("--model", help="Ollama embedding model (default: OLLAMA_MODEL or embeddinggemma)")
+    index_cmd.add_argument("--batch-size", type=int, default=32, help="chunks per Ollama request")
+    index_cmd.add_argument(
+        "--embeddings",
+        choices=["on", "off", "auto"],
+        default={"1": "on", "true": "on", "0": "off", "false": "off"}.get(env_embeddings, env_embeddings),
+        help="off: no Ollama needed, rag: search unavailable; auto: off if Ollama is unreachable"
+        " (default: INDEX_EMBEDDINGS or on)",
+    )
+    index_cmd.add_argument(
+        "--no-embeddings", dest="embeddings", action="store_const", const="off", help="same as --embeddings off"
+    )
+    index_cmd.add_argument(
+        "--rebuild-if-stale",
+        action="store_true",
+        help="rebuild instead of failing when the mbox was replaced since the last run",
+    )
 
-    parsed_args = arguments.parse_args()
+    migrate_cmd = commands.add_parser("migrate", help="upgrade a database built by an older version")
+    migrate_cmd.add_argument("--model", help="model the existing embeddings were built with")
 
-    # process(parsed_args.delete_table)
-    # be careful the database creation took an hour and a half
-    process(drop_previous_table=False)
+    args = parser.parse_args()
+    if args.command == "index" and args.embeddings not in ("on", "off", "auto"):
+        parser.error(f"INDEX_EMBEDDINGS must be on, off or auto, not {args.embeddings!r}")
+    if args.command == "index":
+        print(
+            build_index(
+                rebuild=args.rebuild,
+                model=args.model,
+                batch_size=args.batch_size,
+                embeddings={"on": True, "off": False}.get(args.embeddings, "auto"),
+                rebuild_if_stale=args.rebuild_if_stale,
+            )
+        )
+    else:
+        print(f"Migrated; original kept at {migrate_db(model=args.model)}")

@@ -1,17 +1,56 @@
-version: '3.8'
+# Nothing from your mailbox is baked into the image: the mbox is mounted
+# read-only and the index lives in a separate writable directory. Settings come
+# from the environment or a .env file next to this file (see DOCKER_SETUP.md):
+#
+#   MBOX_DIR          host directory containing the mbox (e.g. a NAS dataset)
+#   MBOX_FILE         mbox file name inside MBOX_DIR
+#   INDEX_DIR         host directory for the DuckDB index (must be writable by PUID)
+#   PUID / PGID       user the app runs as (TrueNAS apps: 568)
+#   COMPOSE_PROFILES  "rag" to also run Ollama for semantic (rag:) search; without it
+#                     only the metadata index is built, which is much faster on a CPU-only NAS
+#   MBOX_VIEWER_BIND  0.0.0.0 to reach the viewer from the LAN (it has no authentication)
+#   MBOX_VIEWER_PORT  host port for the viewer (default 8000)
+
+x-mbox-viewer: &mbox-viewer
+  build: .
+  image: mbox-viewer:latest
+  user: "${PUID:-1000}:${PGID:-1000}"
+  environment:
+    - MBOX_FILE_PATH=/data/mbox/${MBOX_FILE:-emails.mbox}
+    - EMAILS_DB_PATH=/data/index/emails.db
+    - OLLAMA_URL=http://ollama:11434/api/embed
+    - OLLAMA_MODEL=${OLLAMA_MODEL:-embeddinggemma}
+    # auto: embed when Ollama is running (rag profile), otherwise index without
+    - INDEX_EMBEDDINGS=${INDEX_EMBEDDINGS:-auto}
+  # The app only writes to the mounted index directory (indexer) and /tmp
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
 
 services:
-  # Ollama service for embeddings
   ollama:
     image: ollama/ollama:latest
     container_name: mbox-ollama
-    ports:
-      - "11434:11434"
+    profiles: ["rag"]
+    # No published port: only the indexer and viewer reach it, over the compose network
     volumes:
       - ollama_data:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     # Optional: Add GPU support if available
     # deploy:
     #   resources:
@@ -21,23 +60,37 @@ services:
     #           count: 1
     #           capabilities: [gpu]
 
-  # MBOX Viewer application
+  # One-shot job that brings the index up to date before the viewer starts.
+  # The first run indexes everything (and pulls the embedding model); later
+  # runs only read messages appended since, and rebuild if the mbox was replaced.
+  indexer:
+    <<: *mbox-viewer
+    container_name: mbox-viewer-indexer
+    command: ["python", "email_utils.py", "index", "--rebuild-if-stale"]
+    volumes:
+      - ${MBOX_DIR:-./mbox_files}:/data/mbox:ro
+      - ${INDEX_DIR:-./index}:/data/index
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false
+    restart: "no"
+
   mbox-viewer:
-    build: .
+    <<: *mbox-viewer
     container_name: mbox-viewer-app
     ports:
-      - "8000:8000"
+      - "${MBOX_VIEWER_BIND:-127.0.0.1}:${MBOX_VIEWER_PORT:-8000}:8000"
     volumes:
-      - ./emails.db:/app/emails.db
-      - ./mbox_files:/app/mbox_files:ro
-    environment:
-      - MBOX_FILE_PATH=/app/mbox_files/emails.mbox
-      - OLLAMA_URL=http://ollama:11434/api/embed
-      - OLLAMA_MODEL=nomic-embed-text
+      - ${MBOX_DIR:-./mbox_files}:/data/mbox:ro
+      - ${INDEX_DIR:-./index}:/data/index:ro
     depends_on:
-      - ollama
+      indexer:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
-    command: uvicorn email_server:app --host 0.0.0.0 --port 8000
 
 volumes:
   ollama_data:
