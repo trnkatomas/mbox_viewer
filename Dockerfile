@@ -24,5 +24,7 @@ USER app
 EXPOSE 8000
 
 # 0.0.0.0 is needed inside the container; restrict exposure with the published
-# port instead (e.g. -p 127.0.0.1:8000:8000).
-CMD ["uvicorn", "email_server:app", "--host", "0.0.0.0", "--port", "8000"]
+# port instead (e.g. -p 127.0.0.1:8000:8000). Serves HTTPS with the certificate
+# from STATE_DIR (see web_security.py).
+ENV MBOX_VIEWER_HOST=0.0.0.0
+CMD ["python", "email_server.py"]

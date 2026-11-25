@@ -21,11 +21,16 @@ services:
   # whose mbox was replaced, and index newly added mbox files.
   indexer:
     image: ghcr.io/trnkatomas/mbox_viewer:latest
-    command: ["python", "email_utils.py", "index", "--rebuild-if-stale"]
+    # Creates the session key and HTTPS certificates (the viewer's index mount is
+    # read-only), then indexes
+    command: ["sh", "-c", "python web_security.py init && python email_utils.py index --rebuild-if-stale"]
     user: "568:568"
     environment:
       MBOX_DIR: /data/mbox
       INDEX_DIR: /data/index
+      STATE_DIR: /data/index/state
+      # The names/IPs you open the viewer by; the HTTPS certificate covers these
+      ALLOWED_HOSTS: "truenas.local,192.168.1.10"
       # off: no semantic (rag:) search. Set to auto after enabling Ollama below.
       INDEX_EMBEDDINGS: "off"
       OLLAMA_URL: http://ollama:11434/api/embed
@@ -52,13 +57,18 @@ services:
     environment:
       MBOX_DIR: /data/mbox
       INDEX_DIR: /data/index
+      STATE_DIR: /data/index/state
+      # Same value as in the indexer above
+      ALLOWED_HOSTS: "truenas.local,192.168.1.10"
+      # From: docker run --rm -it ghcr.io/trnkatomas/mbox_viewer:latest python web_security.py hash-password
+      MBOX_VIEWER_PASSWORD_HASH: "REPLACE_WITH_PASSWORD_HASH"
       OLLAMA_URL: http://ollama:11434/api/embed
     volumes:
       - /mnt/POOL/mail:/data/mbox:ro
       - /mnt/POOL/apps/mbox:/data/index:ro
-    # Reachable from your LAN at http://<nas-ip>:8000. The viewer has NO login:
-    # anyone who can reach this port can read your mail. Keep it on a trusted
-    # network or put it behind a reverse proxy that adds authentication.
+    # https://<one of ALLOWED_HOSTS>:8000, with a login. The certificate is
+    # self-signed: trust https://<host>:8000/tls/ca.pem on your devices once to
+    # avoid the browser warning (DOCKER_SETUP.md, "HTTPS and login").
     ports:
       - "8000:8000"
     read_only: true

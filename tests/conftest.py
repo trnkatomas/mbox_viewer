@@ -146,3 +146,15 @@ def mock_mbox_path(sample_mbox_file, monkeypatch):
     """Mock the MBOX_FILE_PATH environment variable."""
     monkeypatch.setenv("MBOX_FILE_PATH", sample_mbox_file)
     return sample_mbox_file
+
+
+@pytest.fixture(autouse=True)
+def web_security_env(tmp_path, monkeypatch):
+    """Web tests run with login off unless a test turns it on (see test_web_security.py)."""
+    monkeypatch.setenv("MBOX_VIEWER_AUTH", "off")
+    monkeypatch.setenv("ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("MBOX_VIEWER_PASSWORD_HASH", raising=False)
+    monkeypatch.delenv("MBOX_VIEWER_PASSWORD", raising=False)
+    monkeypatch.delenv("MBOX_VIEWER_SECURITY", raising=False)
+    monkeypatch.delenv("MBOX_VIEWER_TLS", raising=False)

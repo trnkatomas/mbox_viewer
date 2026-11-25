@@ -55,7 +55,7 @@ jobs:
         run: |
           docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --user 568:568 \
             mbox-viewer:smoke-test \
-            python -c "import email_server, email_utils, email_render, mcp_server"
+            python -c "import email_server, email_utils, email_render, mcp_server, web_security"
           docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --user 568:568 \
             mbox-viewer:smoke-test python email_utils.py index --help > /dev/null
 

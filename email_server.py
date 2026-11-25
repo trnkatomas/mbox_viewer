@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING, Annotated, Any, AsyncGenerator, Dict, Iterator
 from urllib.parse import quote, urlencode
 
 from fastapi import Depends, FastAPI, Form, Query, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import email_service
+import web_security
 from email_render import render_email_frame
 from email_utils import (
     InvalidQueryError,
@@ -117,6 +118,10 @@ registry = MailboxRegistry()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # Raises when login is on but no password is set: refusing to start beats
+    # serving the mail to everyone
+    app.state.security = web_security.load_settings()
+    app.state.login_throttle = web_security.LoginThrottle()
     mailboxes = registry.refresh()
     if mailboxes:
         logger.info("Mailboxes: %s", ", ".join(f"{m.id} ({m.mbox_path})" for m in mailboxes))
@@ -129,6 +134,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="FastAPI HTMX Email Client", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+PUBLIC_PATHS = ("/login", "/tls/ca.pem")
+PUBLIC_PREFIXES = ("/static/",)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next: Any) -> Response:
+    """Reject unknown Host headers (DNS rebinding), then require a login session."""
+    settings: Optional[web_security.SecuritySettings] = getattr(request.app.state, "security", None)
+    if settings is None:
+        return Response("Server is starting", status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if not settings.host_allowed(request.headers.get("host", "")):
+        return Response(
+            "Unknown host name. Add it to ALLOWED_HOSTS to reach the viewer by this name.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    path = request.url.path
+    if (
+        not settings.auth_enabled
+        or path in PUBLIC_PATHS
+        or path.startswith(PUBLIC_PREFIXES)
+        or web_security.session_valid(settings, request.cookies.get(web_security.SESSION_COOKIE))
+    ):
+        response: Response = await call_next(request)
+        return response
+
+    if request.headers.get("HX-Request"):
+        # htmx follows HX-Redirect with a full page load, so an expired
+        # session lands on the login page instead of inside a pane
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED, headers={"HX-Redirect": "/login"})
+    if path.startswith("/api/"):
+        return Response("Login required", status_code=status.HTTP_401_UNAUTHORIZED)
+    target = path + (f"?{request.url.query}" if request.url.query else "")
+    return RedirectResponse(f"/login?{urlencode({'next': target})}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _secure_cookie(request: Request) -> bool:
+    return request.url.scheme == "https"
 
 
 def format_date(value: Any) -> str:
@@ -251,13 +294,100 @@ def index(request: Request, mailbox: Optional[str] = None) -> HTMLResponse:
         or (mailboxes[0] if mailboxes else None)
     )
     response = templates.TemplateResponse(
-        request, "index.html", {"mailboxes": mailboxes, "current": current}
+        request,
+        "index.html",
+        {"mailboxes": mailboxes, "current": current, "auth_enabled": request.app.state.security.auth_enabled},
     )
     if current:
         response.set_cookie(
-            MAILBOX_COOKIE, current.id, max_age=365 * 24 * 3600, httponly=True, samesite="lax"
+            MAILBOX_COOKIE,
+            current.id,
+            max_age=365 * 24 * 3600,
+            httponly=True,
+            samesite="lax",
+            secure=_secure_cookie(request),
         )
     return response
+
+
+def _login_page(request: Request, next_path: str, error: Optional[str], status_code: int = 200) -> HTMLResponse:
+    response = templates.TemplateResponse(
+        request,
+        "login.html",
+        {"next": next_path, "error": error, "ca_available": os.path.exists(web_security.tls_files().ca_cert)},
+        status_code=status_code,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request, next: Optional[str] = None) -> Response:
+    settings: web_security.SecuritySettings = request.app.state.security
+    next_path = web_security.safe_next_path(next)
+    if not settings.auth_enabled or web_security.session_valid(
+        settings, request.cookies.get(web_security.SESSION_COOKIE)
+    ):
+        return RedirectResponse(next_path, status_code=status.HTTP_303_SEE_OTHER)
+    return _login_page(request, next_path, None)
+
+
+@app.post("/login", response_class=HTMLResponse)
+def login(
+    request: Request,
+    password: Annotated[str, Form()],
+    next: Annotated[str, Form()] = "/",
+) -> Response:
+    settings: web_security.SecuritySettings = request.app.state.security
+    throttle: web_security.LoginThrottle = request.app.state.login_throttle
+    next_path = web_security.safe_next_path(next)
+    client = request.client.host if request.client else "unknown"
+
+    wait = throttle.retry_after(client)
+    if wait:
+        response: Response = _login_page(
+            request,
+            next_path,
+            f"Too many failed attempts. Try again in {max(1, round(wait / 60))} minute(s).",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        response.headers["Retry-After"] = str(wait)
+        return response
+
+    if not settings.password_hash or not web_security.verify_password(password, settings.password_hash):
+        throttle.record_failure(client)
+        logger.warning("Failed login from %s", client)
+        return _login_page(request, next_path, "Wrong password.", status.HTTP_401_UNAUTHORIZED)
+
+    throttle.reset(client)
+    response = RedirectResponse(next_path, status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        web_security.SESSION_COOKIE,
+        web_security.create_session_token(settings),
+        max_age=settings.session_max_age,
+        httponly=True,
+        samesite="strict",
+        secure=_secure_cookie(request),
+    )
+    return response
+
+
+@app.post("/logout")
+def logout(request: Request) -> Response:
+    response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(
+        web_security.SESSION_COOKIE, httponly=True, samesite="strict", secure=_secure_cookie(request)
+    )
+    return response
+
+
+@app.get("/tls/ca.pem")
+def tls_ca_certificate() -> Response:
+    """The local CA certificate (public), for installing on devices to trust the viewer."""
+    ca_cert = web_security.tls_files().ca_cert
+    if not os.path.exists(ca_cert):
+        return Response("This viewer isn't using its own certificate authority", status_code=404)
+    return FileResponse(ca_cert, media_type="application/x-x509-ca-cert", filename="mbox-viewer-ca.pem")
 
 
 @app.get("/api/mailboxes", response_class=JSONResponse)
@@ -442,12 +572,38 @@ def get_attachment_route(email_id: str, index: int, ctx: Ctx) -> Response:
     )
 
 
-if __name__ == "__main__":
+def serve() -> None:
+    """Run the viewer, over HTTPS unless MBOX_VIEWER_SECURITY=local or MBOX_VIEWER_TLS=off."""
     import uvicorn
 
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    ssl_options: Dict[str, str] = {}
+    if web_security.tls_enabled():
+        files = web_security.tls_files()
+        try:
+            files = web_security.ensure_tls(web_security.allowed_hosts_from_env())
+        except OSError as e:
+            # In the container the viewer's state folder is read-only and the
+            # startup job (`web_security.py init`) has already issued the files
+            if not (os.path.exists(files.cert) and os.path.exists(files.key)):
+                raise SystemExit(
+                    f"No TLS certificate at {files.cert} and it can't be created ({e}). Run "
+                    "`python web_security.py init` with a writable STATE_DIR, or set "
+                    "MBOX_VIEWER_SECURITY=local for a viewer only you can reach."
+                )
+            logger.warning("Could not update the TLS certificate (%s); using the existing one", e)
+        ssl_options = {"ssl_certfile": files.cert, "ssl_keyfile": files.key}
+        logger.info("Serving HTTPS; trust %s on your devices to avoid browser warnings", files.ca_cert)
+    else:
+        logger.warning("Serving plain HTTP: passwords and mail cross the network unencrypted")
+
     uvicorn.run(
-        "email_server:app",
+        app,
         host=os.getenv("MBOX_VIEWER_HOST", "127.0.0.1"),
         port=int(os.getenv("MBOX_VIEWER_PORT", "8000")),
-        reload=True,
+        **ssl_options,  # type: ignore[arg-type]
     )
+
+
+if __name__ == "__main__":
+    serve()
