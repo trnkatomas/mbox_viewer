@@ -68,3 +68,6 @@ index/
 
 # Session key and TLS certificates created by the web viewer
 state/
+
+# Built by the Dockerfile (docker build --target css-export ...)
+static/vendor/tailwind.css

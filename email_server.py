@@ -134,6 +134,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="FastAPI HTMX Email Client", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+# The Docker image always contains the built CSS (see Dockerfile). Running from
+# a checkout without it, pages fall back to Tailwind's CDN.
+templates.env.globals["tailwind_css"] = os.path.isfile(os.path.join("static", "vendor", "tailwind.css"))
 
 PUBLIC_PATHS = ("/login", "/tls/ca.pem")
 PUBLIC_PREFIXES = ("/static/",)
@@ -267,11 +270,15 @@ def _message_view(
     }
 
 
+# Full class names: the Tailwind build only finds classes spelled out in the source
+_TONE_CLASSES = {"gray": "text-gray-600", "red": "text-red-600", "amber": "text-amber-600"}
+
+
 def _message_fragment(text: str, tone: str = "gray") -> str:
     template = templates.env.from_string(
-        '<div class="p-6 text-center text-sm text-{{ tone }}-600">{{ text }}</div>'
+        '<div class="p-6 text-center text-sm {{ tone_class }}">{{ text }}</div>'
     )
-    return template.render(text=text, tone=tone)
+    return template.render(text=text, tone_class=_TONE_CLASSES[tone])
 
 
 def content_disposition(filename: str) -> str:

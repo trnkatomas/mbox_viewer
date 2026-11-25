@@ -186,6 +186,25 @@ any more; it can be deleted.
    MBOX_VIEWER_SECURITY=local uvicorn email_server:app --reload --port 8000
    ```
 
+### Front-end assets
+
+Nothing is loaded from third-party servers:
+
+- **htmx and D3** are committed in `static/vendor/`. To change a version, edit
+  `scripts/vendor_assets.py` and run `python scripts/vendor_assets.py`: it
+  downloads the npm package and refuses it unless it matches the checksum the
+  npm registry publishes. CI fails if a committed copy is edited by hand.
+- **Tailwind CSS** is built during `docker build` by Tailwind's standalone CLI
+  (a single binary pinned by checksum, no Node.js), keeping only the classes
+  the templates use; the image contains just the resulting CSS. When running
+  from a checkout, pages fall back to Tailwind's CDN unless you export the CSS
+  with Docker:
+  ```bash
+  docker build --target css-export --output type=local,dest=static/vendor .
+  ```
+  Write Tailwind class names out in full in templates and code: a name pieced
+  together at runtime (`"text-" + color`) isn't found by the build.
+
 ### Project Structure
 
 ```
@@ -209,7 +228,11 @@ mbox_viewer/
 ├── static/                   # Static assets
 │   ├── sim_script.js        # D3.js visualizations
 │   ├── email_frames.js      # Iframe sizing and list selection
-│   └── mailboxes.js         # Mailbox menu
+│   ├── mailboxes.js         # Mailbox menu
+│   ├── vendor/              # htmx and D3 (committed); tailwind.css (built by Docker)
+│   └── src/tailwind.css     # Tailwind input
+├── scripts/vendor_assets.py # Downloads and verifies htmx and D3
+├── tailwind.config.js       # Which files the Tailwind build scans
 ├── pyproject.toml           # Project dependencies
 └── Dockerfile               # Docker configuration
 ```

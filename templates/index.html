@@ -5,12 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MBox Viewer</title>
 
-    <!-- Load Tailwind CSS CDN for styling -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Load HTMX CDN -->
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <!-- D3.js CDN for interactive charts -->
-    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <!-- Tailwind CSS is built into the Docker image; see Dockerfile -->
+    {% if tailwind_css %}<link rel="stylesheet" href="/static/vendor/tailwind.css">{% else %}<script src="https://cdn.tailwindcss.com"></script>{% endif %}
+    <!-- Vendored by scripts/vendor_assets.py -->
+    <script src="/static/vendor/htmx.min.js"></script>
+    <script src="/static/vendor/d3.min.js"></script>
     <script src="/static/sim_script.js"></script>
     <script src="/static/email_frames.js"></script>
     <script src="/static/mailboxes.js" defer></script>

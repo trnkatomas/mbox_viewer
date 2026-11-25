@@ -49,3 +49,14 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  vendored-libraries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vendored libraries match the npm registry
+        run: |
+          python3 scripts/vendor_assets.py
+          git diff --exit-code static/vendor/htmx.min.js static/vendor/d3.min.js \
+            || { echo "::error::a vendored library differs from its published npm release"; exit 1; }
