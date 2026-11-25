@@ -5,12 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MBox Viewer</title>
 
-    <!-- Load Tailwind CSS CDN for styling -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Load HTMX CDN -->
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <!-- D3.js CDN for interactive charts -->
-    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <!-- Tailwind CSS is built into the Docker image; see Dockerfile -->
+    {% if tailwind_css %}<link rel="stylesheet" href="/static/vendor/tailwind.css">{% else %}<script src="https://cdn.tailwindcss.com"></script>{% endif %}
+    <!-- Vendored by scripts/vendor_assets.py -->
+    <script src="/static/vendor/htmx.min.js"></script>
+    <script src="/static/vendor/d3.min.js"></script>
     <script src="/static/sim_script.js"></script>
     <script src="/static/email_frames.js"></script>
     <script src="/static/mailboxes.js" defer></script>
@@ -98,6 +97,21 @@
                     <span class="hidden md:block">Statistics</span>
                 </a>
             </nav>
+            {% if not auth_enabled %}
+            <p class="mt-6 hidden md:block rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+               title="MBOX_VIEWER_SECURITY=local or MBOX_VIEWER_AUTH=off">
+                No login: anyone who can reach this viewer can read the mail.
+            </p>
+            {% endif %}
+            {% if auth_enabled %}
+            <form method="post" action="/logout" class="mt-6">
+                <button type="submit"
+                        class="flex items-center py-3 px-4 rounded-xl hover:bg-gray-200 transition duration-150 text-gray-600 w-full">
+                    <svg class="w-6 h-6 md:mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                    <span class="hidden md:block">Sign out</span>
+                </button>
+            </form>
+            {% endif %}
         </aside>
 
         <!-- 2. Main Content Area - This entire area is swapped by the simulated server -->

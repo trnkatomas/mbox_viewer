@@ -11,7 +11,14 @@
 #   PUID / PGID       user the app runs as (TrueNAS apps: 568)
 #   COMPOSE_PROFILES  "rag" to also run Ollama for semantic (rag:) search; without it
 #                     only the metadata index is built, which is much faster on a CPU-only NAS
-#   MBOX_VIEWER_BIND  0.0.0.0 to reach the viewer from the LAN (it has no authentication)
+#   MBOX_VIEWER_SECURITY  "full" (default): login + HTTPS. "local": neither, for a
+#                     quick look on your own machine; keep MBOX_VIEWER_BIND=127.0.0.1
+#   MBOX_VIEWER_PASSWORD_HASH  required with full security: login password hash from
+#                     `docker compose run --rm --no-deps indexer python web_security.py hash-password`
+#   ALLOWED_HOSTS     names/IPs you open the viewer by, comma-separated (e.g.
+#                     nas.local,192.168.1.10); requests for other names are refused and
+#                     the HTTPS certificate covers exactly these
+#   MBOX_VIEWER_BIND  0.0.0.0 to reach the viewer from the LAN (HTTPS + login)
 #   MBOX_VIEWER_PORT  host port for the viewer (default 8000)
 
 x-mbox-viewer: &mbox-viewer
@@ -27,6 +34,12 @@ x-mbox-viewer: &mbox-viewer
     - OLLAMA_MODEL=${OLLAMA_MODEL:-embeddinggemma}
     # auto: embed when Ollama is running (rag profile), otherwise index without
     - INDEX_EMBEDDINGS=${INDEX_EMBEDDINGS:-auto}
+    - MBOX_VIEWER_SECURITY=${MBOX_VIEWER_SECURITY:-full}
+    # Session key and HTTPS certificates, created by the indexer's startup step
+    - STATE_DIR=/data/index/state
+    - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+    # Required by the viewer, which refuses to start without it
+    - MBOX_VIEWER_PASSWORD_HASH=${MBOX_VIEWER_PASSWORD_HASH:-}
   # The app only writes to the mounted index directory (indexer) and /tmp
   read_only: true
   tmpfs:
@@ -72,7 +85,9 @@ services:
   indexer:
     <<: *mbox-viewer
     container_name: mbox-viewer-indexer
-    command: ["python", "email_utils.py", "index", "--rebuild-if-stale"]
+    # Creates the session key and HTTPS certificates (the viewer's index mount is
+    # read-only), then indexes
+    command: ["sh", "-c", "python web_security.py init && python email_utils.py index --rebuild-if-stale"]
     volumes:
       - ${MBOX_DIR:-./mbox_files}:/data/mbox:ro
       - ${INDEX_DIR:-./index}:/data/index

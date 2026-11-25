@@ -377,3 +377,25 @@ class TestEmailRendering:
         with patch("email_service.search_emails", return_value=mock_result) as search:
             client.post("/api/search", data={"search_input": "hello", "folder": "Sent"})
         assert search.call_args.kwargs["folder"] == "Sent"
+
+
+class TestStylesheet:
+    def test_built_css_replaces_the_cdn(self, client):
+        from email_server import templates
+
+        original = templates.env.globals["tailwind_css"]
+        try:
+            templates.env.globals["tailwind_css"] = True
+            page = client.get("/").text
+            assert '<link rel="stylesheet" href="/static/vendor/tailwind.css">' in page
+            assert "cdn.tailwindcss.com" not in page
+
+            templates.env.globals["tailwind_css"] = False
+            assert "https://cdn.tailwindcss.com" in client.get("/").text
+        finally:
+            templates.env.globals["tailwind_css"] = original
+
+    def test_no_other_third_party_scripts(self, client):
+        page = client.get("/").text
+        assert 'src="/static/vendor/htmx.min.js"' in page and 'src="/static/vendor/d3.min.js"' in page
+        assert "unpkg.com" not in page and "d3js.org" not in page

@@ -22,6 +22,24 @@ On each start the indexer:
 3. embeds messages that don't have embeddings yet, if Ollama is available. The first run pulls
    the model automatically.
 
+## Quick look without any setup
+
+To browse an mbox on your own machine, one container is enough. It indexes the
+folder (without embeddings, so no Ollama) and serves it at
+http://localhost:8000 with no login and no HTTPS:
+
+```bash
+docker run --rm -p 127.0.0.1:8000:8000 --user "$(id -u):$(id -g)" \
+  -e MBOX_VIEWER_SECURITY=local -e MBOX_DIR=/data/mbox -e INDEX_DIR=/data/index \
+  -v /path/to/mail:/data/mbox:ro -v "$PWD/index:/data/index" \
+  ghcr.io/trnkatomas/mbox_viewer:latest \
+  sh -c "python email_utils.py index --embeddings off && python email_server.py"
+```
+
+`MBOX_VIEWER_SECURITY=local` is what turns the protection off, so keep the
+`127.0.0.1:` in `-p`: without it Docker publishes the port to your whole
+network. Indexes in `./index` are reused on the next run.
+
 ## Quick start
 
 Create a `.env` file next to `docker-compose.yml`:
@@ -29,7 +47,15 @@ Create a `.env` file next to `docker-compose.yml`:
 ```bash
 MBOX_DIR=/path/to/mail          # directory with your .mbox files
 INDEX_DIR=./index               # where the indexes are kept; must be writable by PUID
+ALLOWED_HOSTS=localhost,127.0.0.1,nas.local,192.168.1.10   # names you open it by
+MBOX_VIEWER_PASSWORD_HASH=      # filled in below
 COMPOSE_PROFILES=rag            # remove to run without Ollama / rag: search
+```
+
+Create the login password's hash and paste it into `MBOX_VIEWER_PASSWORD_HASH`:
+
+```bash
+docker compose run --rm --no-deps indexer python web_security.py hash-password
 ```
 
 Then:
@@ -39,7 +65,8 @@ docker compose up -d
 docker compose logs -f indexer    # first run: indexing progress
 ```
 
-Open http://localhost:8000 once the indexer has exited.
+Open https://localhost:8000 once the indexer has exited (see *HTTPS and login*
+below about the certificate warning).
 
 ## Settings
 
@@ -52,12 +79,102 @@ Open http://localhost:8000 once the indexer has exited.
 | `COMPOSE_PROFILES` | *(empty)* | `rag` also starts Ollama |
 | `INDEX_EMBEDDINGS` | `auto` | `on` fails when Ollama is unavailable, `off` never embeds, `auto` embeds when Ollama is reachable |
 | `OLLAMA_MODEL` | `embeddinggemma` | Embedding model; switching needs a rebuild (below) |
-| `MBOX_VIEWER_BIND` | `127.0.0.1` | Host address the viewer is published on |
+| `MBOX_VIEWER_SECURITY` | `full` | `full`: login and HTTPS. `local`: neither, for a viewer only you can reach |
+| `MBOX_VIEWER_PASSWORD_HASH` | *(required with `full`)* | Login password hash from `python web_security.py hash-password` |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated names/IPs the viewer may be reached by (`*.example.lan` works); also the names on its HTTPS certificate |
+| `MBOX_VIEWER_BIND` | `127.0.0.1` | Host address the viewer is published on; `0.0.0.0` for the LAN |
 | `MBOX_VIEWER_PORT` | `8000` | Host port the viewer is published on |
 
-The viewer has no authentication. Setting `MBOX_VIEWER_BIND=0.0.0.0` makes
-your mail readable by anyone on the network, so only do that on a trusted LAN
-or behind a reverse proxy that adds a login.
+## HTTPS and login
+
+The viewer only serves HTTPS and asks for a password before showing anything.
+
+- **Password**: a single password, stored only as a scrypt hash in
+  `MBOX_VIEWER_PASSWORD_HASH` (see *Setting the password* below). Without one
+  the viewer refuses to start. After five wrong attempts from one address
+  (thirty overall) logins pause for fifteen minutes.
+- **Sessions** last seven days (`MBOX_VIEWER_SESSION_HOURS`) in a signed,
+  `HttpOnly`, `SameSite=Strict` cookie. *Sign out* ends one; changing the
+  password ends all of them.
+- **Host names**: requests addressed to a name not in `ALLOWED_HOSTS` are
+  refused. Besides keeping the certificate correct, this stops other websites
+  from reaching the viewer through your browser (DNS rebinding).
+- **Certificate**: on each start the indexer creates, if missing, a small local
+  certificate authority and a server certificate for the `ALLOWED_HOSTS` names,
+  in `INDEX_DIR/state/tls/`. The server certificate is reissued when the names
+  change or it nears expiry; the authority stays the same, so a device only has
+  to trust it once. Until then, browsers show a warning that you can click
+  through. To trust it, open `https://<host>:8000/tls/ca.pem` (the link is also
+  on the login page) and:
+  - **macOS**: open the file, then in Keychain Access set it to *Always Trust*.
+  - **iOS / iPadOS**: install the downloaded profile (*Settings → Profile
+    Downloaded*), then enable it under *Settings → General → About →
+    Certificate Trust Settings*.
+  - **Windows**: open the file, *Install Certificate → Local Machine → Trusted
+    Root Certification Authorities*.
+  - **Android**: *Settings → Security → Encryption & credentials → Install a
+    certificate → CA certificate*.
+  - **Firefox** keeps its own list: *Settings → Privacy & Security →
+    Certificates → View Certificates → Authorities → Import*.
+
+  Only trust it if you set the server up yourself: the authority can vouch for
+  any name. Its private key (`ca-key.pem`) never leaves the index folder.
+
+### Setting the password
+
+The viewer never stores the password itself, only a hash of it. You create the
+hash once with the `hash-password` command, which asks for the password twice
+(at least 12 characters) and prints one line starting with `scrypt:`. That line
+is the value of `MBOX_VIEWER_PASSWORD_HASH`. It contains no `$`, so it can be
+pasted into `.env` and compose files as is. The hash works anywhere, so you can
+create it on any machine that has the image or this repository.
+
+**Running locally** (from a checkout of this repository):
+
+```bash
+uv run python web_security.py hash-password
+```
+
+Put the printed line in your environment or `.env`:
+`MBOX_VIEWER_PASSWORD_HASH=scrypt:17:8:1:...`
+
+**Docker Compose**:
+
+```bash
+docker compose run --rm --no-deps indexer python web_security.py hash-password
+```
+
+Paste the line into `.env` next to `docker-compose.yml`
+(`MBOX_VIEWER_PASSWORD_HASH=scrypt:17:8:1:...`), then run
+`docker compose up -d`. Compose recreates the viewer with the new value.
+
+**TrueNAS**: open *System → Shell* and run
+
+```bash
+docker run --rm -it ghcr.io/trnkatomas/mbox_viewer:latest python web_security.py hash-password
+```
+
+Then edit the app (*Apps → mbox-viewer → Edit*) and replace
+`REPLACE_WITH_PASSWORD_HASH` in the viewer service, keeping the quotes:
+`MBOX_VIEWER_PASSWORD_HASH: "scrypt:17:8:1:..."`. Saving redeploys the app.
+
+**Changing or resetting it**: there is no way to recover a password from its
+hash, so a forgotten password is replaced the same way: create a new hash and
+swap it in. Every open session ends when the hash changes.
+
+`MBOX_VIEWER_PASSWORD` with the plain password also works, but then the
+password is readable by anyone who can inspect the container's environment,
+so prefer the hash.
+
+### Turning it off
+
+`MBOX_VIEWER_SECURITY=local` disables both the login and
+HTTPS (the host-name check stays on). Use it only when the port is reachable
+from your own machine alone, e.g. published as `-p 127.0.0.1:8000:8000`; the
+viewer logs a warning and shows a *No login* notice in its sidebar. Each part
+can also be switched on its own, overriding the mode: `MBOX_VIEWER_AUTH=on|off`
+and `MBOX_VIEWER_TLS=on|off` (e.g. login without HTTPS behind a reverse proxy
+that terminates TLS). Misspelled values stop the server rather than guessing.
 
 All containers drop every Linux capability and run with `no-new-privileges`.
 The indexer and viewer also have a read-only root filesystem: the only
@@ -85,11 +202,16 @@ nothing is built on the NAS.
    (it appears in both services).
 4. **First start**: the `indexer` container indexes the mailbox and exits; the
    `viewer` starts once it has finished. Follow progress in the indexer's logs.
-   The viewer is then at `http://<nas-ip>:8000`.
+   The viewer is then at `https://<nas-ip>:8000`.
 
-The viewer has no login. Anyone who can reach port 8000 can read the mail, so
-keep it on a trusted network or put it behind a reverse proxy that adds
-authentication.
+Before installing, set the two security values in the YAML (see *HTTPS and
+login* above): `ALLOWED_HOSTS` in both services, to the names and IP you will
+open the viewer by, and `MBOX_VIEWER_PASSWORD_HASH` in the viewer. To create
+the hash, run this in the TrueNAS shell (*System → Shell*):
+
+```bash
+docker run --rm -it ghcr.io/trnkatomas/mbox_viewer:latest python web_security.py hash-password
+```
 
 **Multiple mailboxes**: every `*.mbox` file in the mail dataset is a mailbox,
 and the viewer's sidebar has a *Mailbox* menu to switch between them. Each

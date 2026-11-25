@@ -98,14 +98,20 @@ A web-based email viewer for MBOX archive files with search, threading, and stat
    and correct charset handling, which also fixes emails whose text was lost by
    the old extractor.
 
-5. **Start the server**
+5. **Set a login password**
    ```bash
-   uvicorn email_server:app --reload
+   export MBOX_VIEWER_PASSWORD_HASH="$(uv run python web_security.py hash-password)"
    ```
 
-6. **Open your browser**
+6. **Start the server**
+   ```bash
+   uv run python email_server.py
+   ```
+   It serves HTTPS with a certificate from its own local certificate authority
+   (created in `./state` on first start), so the browser warns until you trust
+   that authority. See [DOCKER_SETUP.md](DOCKER_SETUP.md#https-and-login).
 
-   Navigate to `http://localhost:8000`
+7. **Open your browser** at `https://localhost:8000`
 
 ## Configuration
 
@@ -125,8 +131,17 @@ A web-based email viewer for MBOX archive files with search, threading, and stat
   always use the stored model, so changing this variable cannot silently break search.
 - `RAG_MAX_DISTANCE`: Cosine-distance cut-off for `rag:` hits (default: `0.75`)
 - `MBOX_VIEWER_HOST` / `MBOX_VIEWER_PORT`: Bind address for `python email_server.py`
-  (default: `127.0.0.1:8000`). The app has no authentication, so only expose it
-  beyond localhost behind something that adds it.
+  (default: `127.0.0.1:8000`)
+- `MBOX_VIEWER_PASSWORD_HASH`: Login password hash from
+  `python web_security.py hash-password` (required; `MBOX_VIEWER_PASSWORD` with
+  the plain password also works)
+- `ALLOWED_HOSTS`: Comma-separated names/IPs the viewer may be reached by
+  (default: `localhost,127.0.0.1`); also the names on its HTTPS certificate
+- `STATE_DIR`: Where the session key and certificates are kept (default: `./state`)
+- `MBOX_VIEWER_SESSION_HOURS`: Login session lifetime (default: 168)
+- `MBOX_VIEWER_SECURITY`: `full` (default) requires the login and serves HTTPS;
+  `local` turns both off, for a viewer only you can reach. `MBOX_VIEWER_AUTH`
+  and `MBOX_VIEWER_TLS` (`on`/`off`) override each part individually
 - `INDEX_EMBEDDINGS`: Default for `index --embeddings` (`on`, `off` or `auto`; default `on`)
 - `LOG_LEVEL`: Logging level for the MCP server and indexer (default: `INFO`)
 
@@ -166,10 +181,29 @@ any more; it can be deleted.
    isort .
    ```
 
-3. **Run the development server**
+3. **Run the development server** (plain HTTP, no login, auto-reload)
    ```bash
-   uvicorn email_server:app --reload --port 8000
+   MBOX_VIEWER_SECURITY=local uvicorn email_server:app --reload --port 8000
    ```
+
+### Front-end assets
+
+Nothing is loaded from third-party servers:
+
+- **htmx and D3** are committed in `static/vendor/`. To change a version, edit
+  `scripts/vendor_assets.py` and run `python scripts/vendor_assets.py`: it
+  downloads the npm package and refuses it unless it matches the checksum the
+  npm registry publishes. CI fails if a committed copy is edited by hand.
+- **Tailwind CSS** is built during `docker build` by Tailwind's standalone CLI
+  (a single binary pinned by checksum, no Node.js), keeping only the classes
+  the templates use; the image contains just the resulting CSS. When running
+  from a checkout, pages fall back to Tailwind's CDN unless you export the CSS
+  with Docker:
+  ```bash
+  docker build --target css-export --output type=local,dest=static/vendor .
+  ```
+  Write Tailwind class names out in full in templates and code: a name pieced
+  together at runtime (`"text-" + color`) isn't found by the build.
 
 ### Project Structure
 
@@ -179,10 +213,12 @@ mbox_viewer/
 ├── email_service.py          # Business logic shared by the web app and MCP server
 ├── email_utils.py            # mbox reading, parsing, queries, indexing CLI
 ├── email_render.py           # Sanitization and sandboxed iframe documents
+├── web_security.py           # Login, host check, HTTPS certificates (and their CLI)
 ├── mcp_server.py             # MCP tools for AI agents
 ├── ollama_agent.py           # Minimal Ollama agent using the MCP server
 ├── templates/                # Jinja2 templates
 │   ├── index.html           # Main layout
+│   ├── login.html           # Sign-in page
 │   ├── mail_list.jinja      # Email list container
 │   ├── email_list.jinja     # Email list items
 │   ├── _message.jinja       # Shared message card macro
@@ -191,7 +227,12 @@ mbox_viewer/
 │   └── stats.jinja          # Statistics dashboard
 ├── static/                   # Static assets
 │   ├── sim_script.js        # D3.js visualizations
-│   └── email_frames.js      # Iframe sizing and list selection
+│   ├── email_frames.js      # Iframe sizing and list selection
+│   ├── mailboxes.js         # Mailbox menu
+│   ├── vendor/              # htmx and D3 (committed); tailwind.css (built by Docker)
+│   └── src/tailwind.css     # Tailwind input
+├── scripts/vendor_assets.py # Downloads and verifies htmx and D3
+├── tailwind.config.js       # Which files the Tailwind build scans
 ├── pyproject.toml           # Project dependencies
 └── Dockerfile               # Docker configuration
 ```
@@ -343,13 +384,32 @@ from:boss@corp.com subject:budget from_date:2024-01-01 to_date:2024-12-31
 
 ## Docker Deployment
 
-The mbox is never copied into the image: it is mounted read-only and the index
-is built inside the stack by a one-shot `indexer` service before the viewer
-starts. This works well with the mbox on a NAS (TrueNAS, Synology, ...):
+For a quick look at a local mbox, one container without login or HTTPS is
+enough (keep the `127.0.0.1:` so the port stays on your machine):
 
 ```bash
-MBOX_DIR=/mnt/tank/mail INDEX_DIR=/mnt/tank/apps/mbox-viewer docker compose up -d
+docker run --rm -p 127.0.0.1:8000:8000 --user "$(id -u):$(id -g)" \
+  -e MBOX_VIEWER_SECURITY=local -e MBOX_DIR=/data/mbox -e INDEX_DIR=/data/index \
+  -v /path/to/mail:/data/mbox:ro -v "$PWD/index:/data/index" \
+  ghcr.io/trnkatomas/mbox_viewer:latest \
+  sh -c "python email_utils.py index --embeddings off && python email_server.py"
 ```
+
+For anything longer-lived, use compose, which keeps the login and HTTPS on.
+The mbox is never copied into the image: it is mounted read-only and the index
+is built inside the stack by a one-shot `indexer` service before the viewer
+starts. This works well with the mbox on a NAS (TrueNAS, Synology, ...). Put
+the settings in a `.env` file next to `docker-compose.yml`:
+
+```bash
+MBOX_DIR=/mnt/tank/mail
+INDEX_DIR=/mnt/tank/apps/mbox-viewer
+ALLOWED_HOSTS=nas.local,192.168.1.10
+MBOX_VIEWER_BIND=0.0.0.0
+MBOX_VIEWER_PASSWORD_HASH=...   # docker compose run --rm --no-deps indexer python web_security.py hash-password
+```
+
+then run `docker compose up -d` and open `https://nas.local:8000`.
 
 Add `COMPOSE_PROFILES=rag` to also run Ollama for `rag:` search. See
 [DOCKER_SETUP.md](DOCKER_SETUP.md) for all settings.
