@@ -13,6 +13,7 @@ A web-based email viewer for MBOX archive files with search, threading, and stat
 - **Safe HTML Rendering**: Email bodies are sanitized (nh3) and shown in an opaque-origin sandboxed iframe with a strict CSP; remote images are blocked until you opt in per message
 - **Attachment Support**: Download email attachments
 - **Folder Organization**: Inbox and Sent folder views
+- **Multiple Mailboxes**: Point it at a folder of mbox files and switch between them from the sidebar; each has its own index
 
 ## Tech Stack
 
@@ -54,11 +55,17 @@ A web-based email viewer for MBOX archive files with search, threading, and stat
    pip install -e .
    ```
 
-3. **Set up your MBOX file**
+3. **Set up your MBOX files**
 
-   Set the `MBOX_FILE_PATH` environment variable:
+   For a single file, set `MBOX_FILE_PATH`:
    ```bash
    export MBOX_FILE_PATH="/path/to/your/emails.mbox"
+   ```
+   For several mailboxes, point `MBOX_DIR` at a folder of `.mbox` files instead
+   (each gets its own index in `INDEX_DIR`) and switch between them from the
+   *Mailbox* menu in the sidebar:
+   ```bash
+   export MBOX_DIR="/path/to/your/mail" INDEX_DIR="./index"
    ```
 
 4. **Index the MBOX file**
@@ -71,6 +78,7 @@ A web-based email viewer for MBOX archive files with search, threading, and stat
    command again and it continues where it stopped. New messages appended to the
    mbox are picked up the same way, and only the new part of the file is read.
    Use `--rebuild` to start from scratch (for example to switch embedding models).
+   This indexes every mailbox; `--mailbox <id>` indexes just one.
 
    Without Ollama, `--embeddings off` builds a metadata-only index (everything but
    `rag:` search works); a later run with Ollama adds the missing embeddings.
@@ -103,8 +111,14 @@ A web-based email viewer for MBOX archive files with search, threading, and stat
 
 ### Environment Variables
 
-- `MBOX_FILE_PATH`: Path to your MBOX file (required)
-- `EMAILS_DB_PATH`: Path to the DuckDB index (default: `emails.db`)
+- `MBOX_DIR`: Folder of mbox files. Every `*.mbox` file in it (subfolders
+  included) becomes a mailbox you can pick from the sidebar's *Mailbox* menu,
+  indexed into `INDEX_DIR/<mailbox-id>.db`
+- `INDEX_DIR`: Where per-mailbox indexes are kept (default: the folder of `EMAILS_DB_PATH`)
+- `MBOX_FILE_PATH`: A single mbox file, indexed into `EMAILS_DB_PATH`. This was
+  the original setup and still works on its own or together with `MBOX_DIR`.
+  At least one of `MBOX_DIR` and `MBOX_FILE_PATH` is required.
+- `EMAILS_DB_PATH`: Index for `MBOX_FILE_PATH` (default: `emails.db`)
 - `OLLAMA_URL`: Ollama embedding endpoint (default: `http://localhost:11434/api/embed`)
 - `OLLAMA_MODEL`: Embedding model used when indexing (default: `embeddinggemma`).
   The model, vector size and prompt prefixes are stored in the index, and searches
@@ -206,6 +220,7 @@ in the web interface.
 
 | Tool | Description |
 |---|---|
+| `list_mailboxes_tool` | List the mailboxes (mbox files); every other tool takes an optional `mailbox` id |
 | `search_emails_tool` | Search by keyword, sender, subject, date range, label, or semantic query (`rag:`) |
 | `get_email_tool` | Read the full body and metadata of a single email |
 | `get_thread_tool` | Retrieve all emails in a conversation thread |
@@ -333,8 +348,7 @@ is built inside the stack by a one-shot `indexer` service before the viewer
 starts. This works well with the mbox on a NAS (TrueNAS, Synology, ...):
 
 ```bash
-MBOX_DIR=/mnt/tank/mail MBOX_FILE=takeout.mbox INDEX_DIR=/mnt/tank/apps/mbox-viewer \
-  docker compose up -d
+MBOX_DIR=/mnt/tank/mail INDEX_DIR=/mnt/tank/apps/mbox-viewer docker compose up -d
 ```
 
 Add `COMPOSE_PROFILES=rag` to also run Ollama for `rag:` search. See

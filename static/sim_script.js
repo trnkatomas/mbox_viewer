@@ -5,8 +5,11 @@
          * Renders the D3.js charts in the statistics dashboard.
          */
         async function loadStats() {
+            // d3.json doesn't send the htmx X-Mailbox header, so name the mailbox explicitly
+            const mailbox = document.body.dataset.mailbox;
+            const mailboxQuery = mailbox ? "?mailbox=" + encodeURIComponent(mailbox) : "";
             // Fetch and parse volume data
-            const volumeDataRaw = await d3.json("/api/stats/data/dates_size");
+            const volumeDataRaw = await d3.json("/api/stats/data/dates_size" + mailboxQuery);
             // Parse ISO date strings into Date objects
             const volumeData = volumeDataRaw.map(d => ({
                 ...d,
@@ -14,7 +17,7 @@
             }));
 
             // Fetch domain statistics
-            const senderData = await d3.json("/api/stats/data/domains_count");
+            const senderData = await d3.json("/api/stats/data/domains_count" + mailboxQuery);
 
 
 
