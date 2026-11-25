@@ -114,6 +114,94 @@ def get_db_path() -> str:
     return os.getenv("EMAILS_DB_PATH", DEFAULT_DB_PATH)
 
 
+@dataclass(frozen=True)
+class Mailbox:
+    """One mbox file and the index built from it."""
+
+    id: str
+    name: str
+    mbox_path: str
+    db_path: str
+
+    @property
+    def indexed(self) -> bool:
+        return os.path.isfile(self.db_path)
+
+
+MBOX_SUFFIX = ".mbox"
+MAX_MBOX_SCAN_DEPTH = 4
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "mailbox"
+
+
+def _scan_mbox_dir(mbox_dir: str) -> List[str]:
+    """*.mbox files under mbox_dir, skipping hidden directories (e.g. ZFS .zfs)."""
+    found: List[str] = []
+    root_depth = mbox_dir.rstrip(os.sep).count(os.sep)
+    for dirpath, dirnames, filenames in os.walk(mbox_dir):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        if dirpath.count(os.sep) - root_depth >= MAX_MBOX_SCAN_DEPTH:
+            dirnames[:] = []
+        found.extend(
+            os.path.join(dirpath, f)
+            for f in sorted(filenames)
+            if f.lower().endswith(MBOX_SUFFIX) and not f.startswith(".")
+        )
+    return found
+
+
+def discover_mailboxes() -> List[Mailbox]:
+    """
+    Mailboxes from MBOX_FILE_PATH (indexed into EMAILS_DB_PATH, the original
+    single-mailbox setup) and every *.mbox file under MBOX_DIR (each indexed
+    into INDEX_DIR/<id>.db). Ids are derived from file names, never taken from
+    requests, so they can't be used to reach other paths.
+    """
+    candidates: List[Tuple[str, str, Optional[str]]] = []  # (name, mbox path, fixed db path)
+    single = os.getenv("MBOX_FILE_PATH")
+    if single:
+        if os.path.isfile(single):
+            candidates.append((os.path.splitext(os.path.basename(single))[0], single, get_db_path()))
+        else:
+            logger.warning("MBOX_FILE_PATH %s does not exist; skipping it", single)
+
+    mbox_dir = os.getenv("MBOX_DIR")
+    if mbox_dir:
+        if os.path.isdir(mbox_dir):
+            for path in _scan_mbox_dir(mbox_dir):
+                name = os.path.splitext(os.path.relpath(path, mbox_dir))[0].replace(os.sep, "/")
+                candidates.append((name, path, None))
+        else:
+            logger.warning("MBOX_DIR %s is not a directory; skipping it", mbox_dir)
+
+    index_dir = os.getenv("INDEX_DIR") or os.path.dirname(get_db_path()) or "."
+    mailboxes: List[Mailbox] = []
+    seen_paths: set = set()
+    seen_ids: set = set()
+    seen_dbs: set = set()
+    for name, path, fixed_db_path in candidates:
+        real = os.path.realpath(path)
+        if real in seen_paths:
+            continue
+        seen_paths.add(real)
+        base_id = mailbox_id = _slugify(name)
+        suffix = 2
+        while True:
+            db_path = fixed_db_path or os.path.join(index_dir, f"{mailbox_id}.db")
+            # Two mailboxes must never share an index file
+            if mailbox_id not in seen_ids and os.path.realpath(db_path) not in seen_dbs:
+                break
+            mailbox_id = f"{base_id}-{suffix}"
+            suffix += 1
+        seen_ids.add(mailbox_id)
+        seen_dbs.add(os.path.realpath(db_path))
+        mailboxes.append(Mailbox(id=mailbox_id, name=name, mbox_path=path, db_path=db_path))
+    return mailboxes
+
+
 # ---------------------------------------------------------------------------
 # mbox reading
 # ---------------------------------------------------------------------------
@@ -173,9 +261,9 @@ def _message_from_lines(lines: List[bytes]) -> Message:
     return BytesParser(policy=default).parsebytes(b"".join(lines))
 
 
-def read_mbox_slice(start: int, end: int) -> bytes:
-    """Read one raw message from the mbox by byte offsets."""
-    with open(get_mbox_path(), "rb") as f:
+def read_mbox_slice(start: int, end: int, mbox_path: Optional[str] = None) -> bytes:
+    """Read one raw message from the mbox (default: MBOX_FILE_PATH) by byte offsets."""
+    with open(mbox_path or get_mbox_path(), "rb") as f:
         with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
             return mm[start:end]
 
@@ -369,8 +457,10 @@ def parse_email(
     }
 
 
-def load_and_parse_email(email_meta: Email, include_attachment_content: bool = False) -> Dict[str, Any]:
-    raw = read_mbox_slice(email_meta.email_start, email_meta.email_end)
+def load_and_parse_email(
+    email_meta: Email, include_attachment_content: bool = False, mbox_path: Optional[str] = None
+) -> Dict[str, Any]:
+    raw = read_mbox_slice(email_meta.email_start, email_meta.email_end, mbox_path)
     return parse_email(raw, include_attachment_content)
 
 
@@ -1054,6 +1144,22 @@ def _embed_missing(
     flush()
 
 
+def index_mailboxes(mailboxes: Sequence[Mailbox], **options: Any) -> Dict[str, Dict[str, Any]]:
+    """
+    Run build_index for each mailbox. A failure is recorded and the next
+    mailbox is still indexed, so one bad file doesn't block the others.
+    """
+    results: Dict[str, Dict[str, Any]] = {}
+    for mailbox in mailboxes:
+        logger.info("Indexing mailbox %r (%s -> %s)", mailbox.name, mailbox.mbox_path, mailbox.db_path)
+        try:
+            results[mailbox.id] = build_index(mailbox.mbox_path, mailbox.db_path, **options)
+        except Exception as e:
+            logger.error("Indexing mailbox %r failed: %s", mailbox.name, e)
+            results[mailbox.id] = {"error": str(e)}
+    return results
+
+
 def migrate_db(db_path: Optional[str] = None, model: Optional[str] = None) -> str:
     """
     Upgrade a database created before chunked embeddings: widen byte offsets
@@ -1143,6 +1249,10 @@ if __name__ == "__main__":
         action="store_true",
         help="rebuild instead of failing when the mbox was replaced since the last run",
     )
+    index_cmd.add_argument(
+        "--mailbox",
+        help="index only this mailbox id (default: every mailbox from MBOX_FILE_PATH and MBOX_DIR)",
+    )
 
     migrate_cmd = commands.add_parser("migrate", help="upgrade a database built by an older version")
     migrate_cmd.add_argument("--model", help="model the existing embeddings were built with")
@@ -1151,14 +1261,26 @@ if __name__ == "__main__":
     if args.command == "index" and args.embeddings not in ("on", "off", "auto"):
         parser.error(f"INDEX_EMBEDDINGS must be on, off or auto, not {args.embeddings!r}")
     if args.command == "index":
-        print(
-            build_index(
-                rebuild=args.rebuild,
-                model=args.model,
-                batch_size=args.batch_size,
-                embeddings={"on": True, "off": False}.get(args.embeddings, "auto"),
-                rebuild_if_stale=args.rebuild_if_stale,
-            )
+        mailboxes = discover_mailboxes()
+        if args.mailbox:
+            mailboxes = [m for m in mailboxes if m.id == args.mailbox]
+            if not mailboxes:
+                parser.error(f"no mailbox with id {args.mailbox!r}")
+        if not mailboxes:
+            parser.error("no mailboxes found: set MBOX_FILE_PATH or MBOX_DIR")
+        results = index_mailboxes(
+            mailboxes,
+            rebuild=args.rebuild,
+            model=args.model,
+            batch_size=args.batch_size,
+            embeddings={"on": True, "off": False}.get(args.embeddings, "auto"),
+            rebuild_if_stale=args.rebuild_if_stale,
         )
+        for mailbox_id, result in results.items():
+            print(f"{mailbox_id}: {result}")
+        # Exit non-zero only when nothing could be indexed: in compose the viewer
+        # waits for the indexer, and one bad mbox shouldn't keep it down.
+        if all("error" in result for result in results.values()):
+            raise SystemExit(1)
     else:
         print(f"Migrated; original kept at {migrate_db(model=args.model)}")

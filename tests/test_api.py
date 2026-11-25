@@ -8,29 +8,25 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def mock_db_connections():
-    """Mock database connections for testing."""
-    mock_duckdb = Mock()
+def client():
+    """Test client whose requests all resolve to one fake mailbox with a mock DB."""
+    from email_server import (
+        MailboxContext,
+        app,
+        get_mailbox_context,
+        registry,
+        resolve_mailbox,
+    )
+    from email_utils import Mailbox
 
-    # Setup mock responses
-    mock_duckdb.execute = Mock()
-    mock_duckdb.close = Mock()
-
-    with patch("email_server.db_connections", {"duckdb": mock_duckdb}):
-        yield {"duckdb": mock_duckdb}
-
-
-@pytest.fixture
-def client(mock_db_connections):
-    """Create a test client with mocked dependencies."""
-    # Mock the lifespan to avoid actual DB connections
-    with patch(
-        "email_server.load_email_db", return_value=mock_db_connections["duckdb"]
-    ):
-        from email_server import app
-
+    mailbox = Mailbox(id="test", name="Test", mbox_path="/nonexistent.mbox", db_path="/nonexistent.db")
+    app.dependency_overrides[resolve_mailbox] = lambda: mailbox
+    app.dependency_overrides[get_mailbox_context] = lambda: MailboxContext(mailbox=mailbox, db=Mock())
+    with patch("email_server.discover_mailboxes", return_value=[mailbox]):
         with TestClient(app) as test_client:
             yield test_client
+    app.dependency_overrides.clear()
+    registry.close()
 
 
 class TestMainEndpoints:
@@ -286,7 +282,7 @@ class TestAttachmentEndpoint:
             assert response.headers["content-disposition"].startswith("attachment;")
             assert response.headers["x-content-type-options"] == "nosniff"
             get.assert_called_once()
-            assert get.call_args.args[1:] == ("<test1@example.com>", 0)
+            assert get.call_args.args[1:] == ("<test1@example.com>", 0, "/nonexistent.mbox")
 
     def test_unicode_and_quote_in_filename(self, client):
         mock_attachment = {

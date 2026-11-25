@@ -1,7 +1,9 @@
 import datetime
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, AsyncGenerator, Dict, Iterator, List, Optional
 from urllib.parse import quote, urlencode
 
@@ -14,9 +16,10 @@ import email_service
 from email_render import render_email_frame
 from email_utils import (
     InvalidQueryError,
+    Mailbox,
     RagUnavailableError,
     check_index_freshness,
-    get_mbox_path,
+    discover_mailboxes,
     load_email_db,
 )
 
@@ -25,34 +28,102 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-db_connections: Dict[str, "duckdb.DuckDBPyConnection"] = {}
-
 EMAILS_PER_PAGE = 25
+MAILBOX_COOKIE = "mailbox"
+MAILBOX_HEADER = "X-Mailbox"
+
+
+class MailboxUnavailable(Exception):
+    """The requested mailbox doesn't exist or has no index yet."""
+
+
+class MailboxRegistry:
+    """
+    Known mailboxes and a lazily opened read-only connection per mailbox.
+    Connections stay open, so the indexer can't rewrite an index while the
+    viewer is running (DuckDB allows one writer or many readers).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._mailboxes: Dict[str, Mailbox] = {}
+        self._connections: Dict[str, "duckdb.DuckDBPyConnection"] = {}
+        self._problems: Dict[str, Optional[str]] = {}
+
+    def refresh(self) -> List[Mailbox]:
+        mailboxes = discover_mailboxes()
+        with self._lock:
+            self._mailboxes = {m.id: m for m in mailboxes}
+        return mailboxes
+
+    def all(self) -> List[Mailbox]:
+        return list(self._mailboxes.values())
+
+    def get(self, mailbox_id: str) -> Optional[Mailbox]:
+        if mailbox_id not in self._mailboxes:
+            self.refresh()  # a new mbox may have been added since the last scan
+        return self._mailboxes.get(mailbox_id)
+
+    def default(self) -> Optional[Mailbox]:
+        if not self._mailboxes:
+            self.refresh()
+        return next(iter(self._mailboxes.values()), None)
+
+    def connection(self, mailbox: Mailbox) -> "duckdb.DuckDBPyConnection":
+        with self._lock:
+            con = self._connections.get(mailbox.id)
+            if con is None:
+                if not mailbox.indexed:
+                    raise MailboxUnavailable(
+                        f"The mailbox \u201c{mailbox.name}\u201d hasn't been indexed yet. "
+                        f"Run `python email_utils.py index --mailbox {mailbox.id}`."
+                    )
+                con = self._connections[mailbox.id] = load_email_db(mailbox.db_path)
+                self._problems[mailbox.id] = _index_problem(con, mailbox)
+            return con
+
+    def problem(self, mailbox: Mailbox) -> Optional[str]:
+        """Why the index can't be trusted (e.g. the mbox was replaced), if it can't."""
+        return self._problems.get(mailbox.id)
+
+    def close(self) -> None:
+        with self._lock:
+            for con in self._connections.values():
+                con.close()
+            self._connections.clear()
+            self._problems.clear()
+
+
+def _index_problem(db: "duckdb.DuckDBPyConnection", mailbox: Mailbox) -> Optional[str]:
+    """Messages are read by byte offset, so a replaced mbox would show the wrong mail."""
+    try:
+        problem = check_index_freshness(db, mailbox.mbox_path)
+    except Exception as e:
+        logger.warning("Could not verify the index of %r against its mbox: %s", mailbox.name, e)
+        return None
+    if problem:
+        logger.error(
+            "The index of %r does not match its mbox (%s); messages will not display correctly. "
+            "Run `python email_utils.py index --mailbox %s --rebuild`.",
+            mailbox.name,
+            problem,
+            mailbox.id,
+        )
+    return problem
+
+
+registry = MailboxRegistry()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    db_connections["duckdb"] = load_email_db()
-    _warn_if_index_stale(db_connections["duckdb"])
+    mailboxes = registry.refresh()
+    if mailboxes:
+        logger.info("Mailboxes: %s", ", ".join(f"{m.id} ({m.mbox_path})" for m in mailboxes))
+    else:
+        logger.warning("No mailboxes found: set MBOX_FILE_PATH or MBOX_DIR")
     yield
-    if duckdb_con := db_connections.get("duckdb"):
-        duckdb_con.close()
-    db_connections.clear()
-
-
-def _warn_if_index_stale(db: "duckdb.DuckDBPyConnection") -> None:
-    """Messages are read by byte offset, so a replaced mbox would show the wrong mail."""
-    try:
-        problem = check_index_freshness(db, get_mbox_path())
-    except Exception as e:
-        logger.warning("Could not verify the index against the mbox: %s", e)
-        return
-    if problem:
-        logger.error(
-            "The index does not match the mbox (%s); messages will not display correctly. "
-            "Run `python email_utils.py index --rebuild`.",
-            problem,
-        )
+    registry.close()
 
 
 app = FastAPI(title="FastAPI HTMX Email Client", lifespan=lifespan)
@@ -81,19 +152,57 @@ templates.env.filters["format_date"] = format_date
 templates.env.filters["format_size"] = format_size
 
 
-def get_db() -> Iterator["duckdb.DuckDBPyConnection"]:
+def resolve_mailbox(request: Request) -> Mailbox:
+    """
+    The mailbox a request is for: the X-Mailbox header (sent by every htmx
+    request on the page), a ?mailbox= query parameter (plain links and chart
+    data), then the remembered cookie, then the first mailbox. An explicit id
+    that doesn't exist is an error rather than silently showing another mailbox.
+    """
+    requested = request.headers.get(MAILBOX_HEADER) or request.query_params.get("mailbox")
+    if requested:
+        mailbox = registry.get(requested)
+        if mailbox is None:
+            raise MailboxUnavailable(f"There is no mailbox \u201c{requested}\u201d.")
+        return mailbox
+    remembered = request.cookies.get(MAILBOX_COOKIE)
+    mailbox = (registry.get(remembered) if remembered else None) or registry.default()
+    if mailbox is None:
+        raise MailboxUnavailable("No mailboxes found. Set MBOX_DIR or MBOX_FILE_PATH.")
+    return mailbox
+
+
+@dataclass
+class MailboxContext:
+    mailbox: Mailbox
+    db: Any
+
+
+def get_mailbox_context(
+    mailbox: Annotated[Mailbox, Depends(resolve_mailbox)],
+) -> Iterator[MailboxContext]:
     """A cursor per request: DuckDB connections must not be shared across threads."""
-    cursor = db_connections["duckdb"].cursor()
+    cursor = registry.connection(mailbox).cursor()
     try:
-        yield cursor
+        yield MailboxContext(mailbox=mailbox, db=cursor)
     finally:
         cursor.close()
 
 
-Db = Annotated[Any, Depends(get_db)]
+Ctx = Annotated[MailboxContext, Depends(get_mailbox_context)]
+CurrentMailbox = Annotated[Mailbox, Depends(resolve_mailbox)]
+
+
+@app.exception_handler(MailboxUnavailable)
+def mailbox_unavailable_handler(request: Request, exc: MailboxUnavailable) -> Response:
+    if request.url.path.startswith("/api/stats/data/"):
+        return JSONResponse([])
+    # 200 so htmx swaps the message in place of the content
+    return HTMLResponse(_message_fragment(str(exc), tone="amber"))
 
 
 def _message_view(
+    mailbox: Mailbox,
     email_meta: Dict[str, Any],
     body: Optional[str],
     body_type: str,
@@ -111,6 +220,7 @@ def _message_view(
         "attachments": attachments,
         "frame_html": frame_html,
         "remote_blocked": has_remote and not allow_remote,
+        "mailbox_id": mailbox.id,
     }
 
 
@@ -132,13 +242,48 @@ def content_disposition(filename: str) -> str:
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "index.html")
+def index(request: Request, mailbox: Optional[str] = None) -> HTMLResponse:
+    mailboxes = registry.refresh()
+    by_id = {m.id: m for m in mailboxes}
+    current = (
+        by_id.get(mailbox or "")
+        or by_id.get(request.cookies.get(MAILBOX_COOKIE) or "")
+        or (mailboxes[0] if mailboxes else None)
+    )
+    response = templates.TemplateResponse(
+        request, "index.html", {"mailboxes": mailboxes, "current": current}
+    )
+    if current:
+        response.set_cookie(
+            MAILBOX_COOKIE, current.id, max_age=365 * 24 * 3600, httponly=True, samesite="lax"
+        )
+    return response
+
+
+@app.get("/api/mailboxes", response_class=JSONResponse)
+def list_mailboxes() -> List[Dict[str, Any]]:
+    return [{"id": m.id, "name": m.name, "indexed": m.indexed} for m in registry.refresh()]
+
+
+def _mailbox_notice(mailbox: Mailbox) -> Optional[str]:
+    if not mailbox.indexed:
+        return None  # the list itself explains this
+    try:
+        registry.connection(mailbox)
+    except Exception as e:
+        return f"The index can't be opened: {e}"
+    problem = registry.problem(mailbox)
+    if problem:
+        return (
+            f"This index doesn't match the mbox file ({problem}), so messages may show the "
+            f"wrong content. Rebuild it with `python email_utils.py index --mailbox {mailbox.id} --rebuild`."
+        )
+    return None
 
 
 @app.get("/api/stats/layout", response_class=HTMLResponse)
-def stats_layout(db: Db) -> HTMLResponse:
-    stats = email_service.get_stats_summary(db)
+def stats_layout(ctx: Ctx) -> HTMLResponse:
+    stats = email_service.get_stats_summary(ctx.db)
     return HTMLResponse(
         templates.get_template("stats.jinja").render(
             all_emails=stats["all_emails"],
@@ -149,32 +294,40 @@ def stats_layout(db: Db) -> HTMLResponse:
 
 
 @app.get("/api/stats/data/{query_name}", response_class=JSONResponse)
-def stats_data(query_name: str, db: Db) -> List[Dict[str, Any]]:
-    return email_service.get_stats_time_series(db, query_name)
+def stats_data(query_name: str, ctx: Ctx) -> List[Dict[str, Any]]:
+    return email_service.get_stats_time_series(ctx.db, query_name)
+
+
+def _mail_list_layout(mailbox: Mailbox, folder: str) -> HTMLResponse:
+    return HTMLResponse(
+        templates.get_template("mail_list.jinja").render(
+            folder=folder, mailbox=mailbox, notice=_mailbox_notice(mailbox)
+        )
+    )
 
 
 @app.get("/api/inbox/layout", response_class=HTMLResponse)
-def inbox_layout() -> HTMLResponse:
-    return HTMLResponse(templates.get_template("mail_list.jinja").render(folder=""))
+def inbox_layout(mailbox: CurrentMailbox) -> HTMLResponse:
+    return _mail_list_layout(mailbox, "")
 
 
 @app.get("/api/sent/layout", response_class=HTMLResponse)
-def sent_layout() -> HTMLResponse:
-    return HTMLResponse(templates.get_template("mail_list.jinja").render(folder="Sent"))
+def sent_layout(mailbox: CurrentMailbox) -> HTMLResponse:
+    return _mail_list_layout(mailbox, "Sent")
 
 
 @app.post("/api/search", response_class=HTMLResponse)
 def handle_search(
     search_input: Annotated[str, Form()],
-    db: Db,
+    ctx: Ctx,
     folder: Annotated[str, Form()] = "",
 ) -> HTMLResponse:
-    return email_list(db=db, page=1, query=search_input, folder=folder)
+    return email_list(ctx=ctx, page=1, query=search_input, folder=folder)
 
 
 @app.get("/api/email/list", response_class=HTMLResponse)
 def email_list(
-    db: Db,
+    ctx: Ctx,
     page: int = Query(1, ge=1),
     query: Optional[str] = None,
     folder: Optional[str] = None,
@@ -182,7 +335,7 @@ def email_list(
     """HTMX route for the initial list and infinite scrolling."""
     try:
         result = email_service.search_emails(
-            db=db, query=query, page=page, page_size=EMAILS_PER_PAGE, folder=folder
+            db=ctx.db, query=query, page=page, page_size=EMAILS_PER_PAGE, folder=folder
         )
     except (RagUnavailableError, InvalidQueryError) as e:
         return HTMLResponse(_message_fragment(str(e), tone="red"))
@@ -208,9 +361,11 @@ def email_list(
 
 
 @app.get("/api/email/{email_id:path}", response_class=HTMLResponse)
-def email_detail(email_id: str, db: Db, remote: bool = False) -> HTMLResponse:
+def email_detail(email_id: str, ctx: Ctx, remote: bool = False) -> HTMLResponse:
     """HTMX route for the detail pane."""
-    result = email_service.get_email_with_thread(db=db, email_id=email_id)
+    result = email_service.get_email_with_thread(
+        db=ctx.db, email_id=email_id, mbox_path=ctx.mailbox.mbox_path
+    )
     if result is None:
         return HTMLResponse(
             _message_fragment("Error: Email not found.", tone="red"),
@@ -219,6 +374,7 @@ def email_detail(email_id: str, db: Db, remote: bool = False) -> HTMLResponse:
 
     email_meta = result["email_meta"]
     message = _message_view(
+        ctx.mailbox,
         email_meta,
         result["email_content"],
         result.get("body_type", "HTML"),
@@ -238,8 +394,10 @@ def email_detail(email_id: str, db: Db, remote: bool = False) -> HTMLResponse:
 
 
 @app.get("/api/email_thread/{thread_id}", response_class=HTMLResponse)
-def email_thread_detail(thread_id: str, db: Db, remote: bool = False) -> HTMLResponse:
-    enriched_thread = email_service.get_thread_with_emails(db=db, thread_id=thread_id)
+def email_thread_detail(thread_id: str, ctx: Ctx, remote: bool = False) -> HTMLResponse:
+    enriched_thread = email_service.get_thread_with_emails(
+        db=ctx.db, thread_id=thread_id, mbox_path=ctx.mailbox.mbox_path
+    )
     if enriched_thread is None:
         return HTMLResponse(
             _message_fragment("Error: Thread not found.", tone="red"),
@@ -248,6 +406,7 @@ def email_thread_detail(thread_id: str, db: Db, remote: bool = False) -> HTMLRes
 
     messages = [
         _message_view(
+            ctx.mailbox,
             email,
             email.get("parsed_body"),
             email.get("body_type", "HTML"),
@@ -267,8 +426,8 @@ def email_thread_detail(thread_id: str, db: Db, remote: bool = False) -> HTMLRes
 
 
 @app.get("/api/attachment/{email_id:path}/{index:int}", response_class=Response)
-def get_attachment_route(email_id: str, index: int, db: Db) -> Response:
-    attachment = email_service.get_attachment(db, email_id, index)
+def get_attachment_route(email_id: str, index: int, ctx: Ctx) -> Response:
+    attachment = email_service.get_attachment(ctx.db, email_id, index, ctx.mailbox.mbox_path)
     if not attachment or not isinstance(attachment.get("content"), bytes):
         return Response("Attachment not found", status_code=status.HTTP_404_NOT_FOUND)
 

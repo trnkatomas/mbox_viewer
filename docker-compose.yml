@@ -2,9 +2,12 @@
 # read-only and the index lives in a separate writable directory. Settings come
 # from the environment or a .env file next to this file (see DOCKER_SETUP.md):
 #
-#   MBOX_DIR          host directory containing the mbox (e.g. a NAS dataset)
-#   MBOX_FILE         mbox file name inside MBOX_DIR
-#   INDEX_DIR         host directory for the DuckDB index (must be writable by PUID)
+#   MBOX_DIR          host directory with the mbox files (e.g. a NAS dataset); every
+#                     *.mbox file in it (including subfolders) becomes a mailbox that
+#                     can be picked from the Mailbox menu, with its own index file
+#   MBOX_FILE         optional: an mbox in MBOX_DIR whose index is emails.db, for
+#                     indexes built before multiple mailboxes were supported
+#   INDEX_DIR         host directory for the DuckDB indexes (must be writable by PUID)
 #   PUID / PGID       user the app runs as (TrueNAS apps: 568)
 #   COMPOSE_PROFILES  "rag" to also run Ollama for semantic (rag:) search; without it
 #                     only the metadata index is built, which is much faster on a CPU-only NAS
@@ -16,6 +19,8 @@ x-mbox-viewer: &mbox-viewer
   image: mbox-viewer:latest
   user: "${PUID:-1000}:${PGID:-1000}"
   environment:
+    - MBOX_DIR=/data/mbox
+    - INDEX_DIR=/data/index
     - MBOX_FILE_PATH=/data/mbox/${MBOX_FILE:-emails.mbox}
     - EMAILS_DB_PATH=/data/index/emails.db
     - OLLAMA_URL=http://ollama:11434/api/embed
@@ -60,9 +65,10 @@ services:
     #           count: 1
     #           capabilities: [gpu]
 
-  # One-shot job that brings the index up to date before the viewer starts.
-  # The first run indexes everything (and pulls the embedding model); later
-  # runs only read messages appended since, and rebuild if the mbox was replaced.
+  # One-shot job that brings every mailbox's index up to date before the viewer
+  # starts. The first run indexes everything (and pulls the embedding model);
+  # later runs only read messages appended since, rebuild an index whose mbox
+  # was replaced, and index mbox files added since the last start.
   indexer:
     <<: *mbox-viewer
     container_name: mbox-viewer-indexer

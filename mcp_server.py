@@ -39,6 +39,9 @@ from email_utils import (
     DEFAULT_OLLAMA_URL,
     InvalidQueryError,
     RagUnavailableError,
+    Mailbox,
+    discover_mailboxes,
+    get_db_path,
     get_embedding_config,
     html_to_text,
     load_email_db,
@@ -88,30 +91,51 @@ mcp = FastMCP(
         "- rag: requires the Ollama embedding service; if it is down the search returns an "
         "error instead of results (check get_server_status_tool).\n"
         "- Use folder='Sent' parameter on search_emails_tool to restrict to sent mail.\n"
+        "\n"
+        "## Multiple mailboxes\n"
+        "The archive may contain several mailboxes (one per mbox file). Call "
+        "list_mailboxes_tool to see them; every other tool takes an optional mailbox id "
+        "and defaults to the first mailbox. Message and thread ids belong to one mailbox, "
+        "so pass the same mailbox to get_email_tool/get_thread_tool as to the search.\n"
     ),
 )
 
-# Single shared DB connection (read-only, thread-safe)
-_db: Any = None
+class UnknownMailboxError(ValueError):
+    pass
 
 
-def _get_db() -> Any:
-    global _db
-    if _db is None:
-        mbox_path = os.environ.get("MBOX_FILE_PATH", "<not set>")
-        ollama_url = os.environ.get("OLLAMA_URL", "<not set>")
-        ollama_model = os.environ.get("OLLAMA_MODEL", "<not set>")
-        logger.info(
-            "Initialising database connection — MBOX_FILE_PATH=%r OLLAMA_URL=%r OLLAMA_MODEL=%r",
-            mbox_path, ollama_url, ollama_model,
-        )
+# One read-only connection per index file, opened on first use
+_dbs: Dict[str, Any] = {}
+
+
+def _resolve_mailbox(mailbox: Optional[str]) -> Optional[Mailbox]:
+    """The named mailbox, or the first one; None when no mailbox is configured."""
+    mailboxes = discover_mailboxes()
+    if mailbox:
+        for candidate in mailboxes:
+            if candidate.id == mailbox:
+                return candidate
+        known = ", ".join(m.id for m in mailboxes) or "none"
+        raise UnknownMailboxError(f"Unknown mailbox {mailbox!r} (known: {known})")
+    return mailboxes[0] if mailboxes else None
+
+
+def _get_db(mailbox: Optional[str] = None) -> Any:
+    resolved = _resolve_mailbox(mailbox)
+    db_path = resolved.db_path if resolved else get_db_path()
+    if db_path not in _dbs:
+        logger.info("Opening index %s for mailbox %r", db_path, resolved.id if resolved else None)
         try:
-            _db = load_email_db()
+            _dbs[db_path] = load_email_db(db_path)
         except Exception:
-            logger.exception("load_email_db() failed — MBOX_FILE_PATH=%r", mbox_path)
+            logger.exception("Could not open index %s", db_path)
             raise
-        logger.info("Database loaded successfully")
-    return _db
+    return _dbs[db_path]
+
+
+def _mbox_path(mailbox: Optional[str] = None) -> Optional[str]:
+    resolved = _resolve_mailbox(mailbox)
+    return resolved.mbox_path if resolved else None
 
 
 # ---------------------------------------------------------------------------
@@ -143,17 +167,28 @@ def _attachment_summary(attachment: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _serialisable(obj: Any) -> Any:
-    """Recursively convert non-JSON-serialisable values (e.g. datetimes, bytes)."""
+    """Recursively convert values JSON can't encode (datetimes, bytes, NumPy types, NaN/NaT)."""
     import datetime
+    import math
+
+    import numpy as np
+    import pandas as pd
 
     if isinstance(obj, dict):
         return {k: _serialisable(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple, np.ndarray)):
+        # DuckDB list columns (e.g. labels) arrive as NumPy arrays
         return [_serialisable(v) for v in obj]
+    if obj is pd.NaT:
+        return None
     if isinstance(obj, (datetime.datetime, datetime.date)):
         return obj.isoformat()
     if isinstance(obj, bytes):
         return f"<binary {len(obj)} bytes>"
+    if isinstance(obj, np.generic):
+        obj = obj.item()
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
     return obj
 
 
@@ -168,6 +203,7 @@ def search_emails_tool(
     page: int = 1,
     page_size: int = 20,
     folder: Optional[str] = None,
+    mailbox: Optional[str] = None,
 ) -> str:
     """Search emails in the archive. Returns summaries; use get_email_tool to read a full message.
 
@@ -193,6 +229,7 @@ def search_emails_tool(
         page: Page number, 1-indexed (default 1).
         page_size: Results per page (default 20, max 100).
         folder: Pass "Sent" to restrict results to the Sent folder.
+        mailbox: Mailbox id from list_mailboxes_tool (default: the first mailbox).
 
     Returns:
         JSON with keys:
@@ -207,7 +244,10 @@ def search_emails_tool(
         "search_emails_tool called: query=%r page=%d page_size=%d folder=%r",
         query, page, page_size, folder,
     )
-    db = _get_db()
+    try:
+        db = _get_db(mailbox)
+    except UnknownMailboxError as exc:
+        return json.dumps({"error": str(exc)})
     page_size = min(page_size, 100)
     try:
         result = search_emails(db, query, page, page_size, folder)
@@ -236,13 +276,14 @@ def search_emails_tool(
 
 
 @mcp.tool()
-def get_email_tool(email_id: str, include_html: bool = False) -> str:
+def get_email_tool(email_id: str, include_html: bool = False, mailbox: Optional[str] = None) -> str:
     """Retrieve the full content of a single email.
 
     Args:
         email_id: The message_id of the email (as returned by search_emails_tool).
         include_html: If True, return the raw HTML body instead of plain text.
                       Default is False (plain text is easier for agents to read).
+        mailbox: Mailbox id from list_mailboxes_tool (default: the first mailbox).
 
     Returns:
         JSON with keys:
@@ -259,9 +300,12 @@ def get_email_tool(email_id: str, include_html: bool = False) -> str:
           thread        – list of other emails in the same thread (summaries only)
     """
     logger.info("get_email_tool called: email_id=%r include_html=%r", email_id, include_html)
-    db = _get_db()
     try:
-        data = get_email_with_thread(db, email_id)
+        db, mbox_path = _get_db(mailbox), _mbox_path(mailbox)
+    except UnknownMailboxError as exc:
+        return json.dumps({"error": str(exc)})
+    try:
+        data = get_email_with_thread(db, email_id, mbox_path)
     except Exception:
         logger.exception("get_email_tool failed: email_id=%r", email_id)
         raise
@@ -307,12 +351,13 @@ def get_email_tool(email_id: str, include_html: bool = False) -> str:
 
 
 @mcp.tool()
-def get_thread_tool(thread_id: str, include_html: bool = False) -> str:
+def get_thread_tool(thread_id: str, include_html: bool = False, mailbox: Optional[str] = None) -> str:
     """Retrieve all emails in a conversation thread.
 
     Args:
         thread_id: Thread identifier (as returned by search_emails_tool or get_email_tool).
         include_html: If True, return raw HTML bodies. Default False (plain text).
+        mailbox: Mailbox id from list_mailboxes_tool (default: the first mailbox).
 
     Returns:
         JSON array of email objects, each with:
@@ -321,9 +366,12 @@ def get_thread_tool(thread_id: str, include_html: bool = False) -> str:
         Emails are ordered oldest-first.
     """
     logger.info("get_thread_tool called: thread_id=%r include_html=%r", thread_id, include_html)
-    db = _get_db()
     try:
-        emails = get_thread_with_emails(db, thread_id)
+        db, mbox_path = _get_db(mailbox), _mbox_path(mailbox)
+    except UnknownMailboxError as exc:
+        return json.dumps({"error": str(exc)})
+    try:
+        emails = get_thread_with_emails(db, thread_id, mbox_path)
     except Exception:
         logger.exception("get_thread_tool failed: thread_id=%r", thread_id)
         raise
@@ -360,7 +408,7 @@ def get_thread_tool(thread_id: str, include_html: bool = False) -> str:
 
 
 @mcp.tool()
-def get_attachment_info_tool(email_id: str, filename: str) -> str:
+def get_attachment_info_tool(email_id: str, filename: str, mailbox: Optional[str] = None) -> str:
     """Get metadata about a specific email attachment.
 
     Returns attachment metadata (filename, content_type, size).
@@ -369,14 +417,18 @@ def get_attachment_info_tool(email_id: str, filename: str) -> str:
     Args:
         email_id: The message_id of the email containing the attachment.
         filename: The filename of the attachment (as listed in get_email_tool).
+        mailbox: Mailbox id from list_mailboxes_tool (default: the first mailbox).
 
     Returns:
         JSON with keys: filename, content_type, size_bytes
     """
     logger.info("get_attachment_info_tool called: email_id=%r filename=%r", email_id, filename)
-    db = _get_db()
     try:
-        attachment = get_attachment(db, email_id, filename)
+        db, mbox_path = _get_db(mailbox), _mbox_path(mailbox)
+    except UnknownMailboxError as exc:
+        return json.dumps({"error": str(exc)})
+    try:
+        attachment = get_attachment(db, email_id, filename, mbox_path)
     except Exception:
         logger.exception("get_attachment_info_tool failed: email_id=%r filename=%r", email_id, filename)
         raise
@@ -393,8 +445,11 @@ def get_attachment_info_tool(email_id: str, filename: str) -> str:
 
 
 @mcp.tool()
-def get_stats_tool() -> str:
+def get_stats_tool(mailbox: Optional[str] = None) -> str:
     """Get summary statistics for the email archive.
+
+    Args:
+        mailbox: Mailbox id from list_mailboxes_tool (default: the first mailbox).
 
     Returns:
         JSON with keys:
@@ -405,7 +460,10 @@ def get_stats_tool() -> str:
           last_seen     – date of newest email (ISO-8601)
     """
     logger.info("get_stats_tool called")
-    db = _get_db()
+    try:
+        db = _get_db(mailbox)
+    except UnknownMailboxError as exc:
+        return json.dumps({"error": str(exc)})
     try:
         stats = get_stats_summary(db)
     except Exception:
@@ -413,6 +471,23 @@ def get_stats_tool() -> str:
         raise
     logger.info("get_stats_tool returning stats: %s", stats)
     return json.dumps(_serialisable(stats), ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def list_mailboxes_tool() -> str:
+    """List the mailboxes (mbox files) in the archive.
+
+    Returns:
+        JSON array of {id, name, indexed}. Pass an id as the mailbox argument of
+        the other tools; mailboxes with indexed=false can't be searched yet.
+    """
+    mailboxes = discover_mailboxes()
+    logger.info("list_mailboxes_tool returning %d mailboxes", len(mailboxes))
+    return json.dumps(
+        [{"id": m.id, "name": m.name, "indexed": m.indexed} for m in mailboxes],
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def _ollama_reachable(embed_url: str) -> bool:
@@ -440,6 +515,8 @@ def get_server_status_tool() -> str:
           embedding_model   – model the index was built with (used for queries)
           embedding_dim     – vector size of the index
           embedded_emails   – number of emails with at least one embedding
+                              (embedding fields describe the default mailbox)
+          mailboxes         – every mailbox: {id, name, indexed}
           rag_available     – whether rag: search should work right now
     """
     logger.info("get_server_status_tool called")
@@ -454,6 +531,9 @@ def get_server_status_tool() -> str:
         "embedding_model": None,
         "embedding_dim": None,
         "embedded_emails": 0,
+        "mailboxes": [
+            {"id": m.id, "name": m.name, "indexed": m.indexed} for m in discover_mailboxes()
+        ],
     }
 
     try:
@@ -474,13 +554,14 @@ def get_server_status_tool() -> str:
 
 
 @mcp.tool()
-def get_stats_time_series_tool(query_name: str) -> str:
+def get_stats_time_series_tool(query_name: str, mailbox: Optional[str] = None) -> str:
     """Get time-series statistics for the email archive.
 
     Args:
         query_name: One of:
           - "dates_size"    – monthly cumulative email sizes over time
           - "domains_count" – top sender domains by message count
+        mailbox: Mailbox id from list_mailboxes_tool (default: the first mailbox).
 
     Returns:
         JSON array of data-point objects.
@@ -488,7 +569,10 @@ def get_stats_time_series_tool(query_name: str) -> str:
         For domains_count: [{domain, count}, ...]
     """
     logger.info("get_stats_time_series_tool called: query_name=%r", query_name)
-    db = _get_db()
+    try:
+        db = _get_db(mailbox)
+    except UnknownMailboxError as exc:
+        return json.dumps({"error": str(exc)})
     try:
         data = get_stats_time_series(db, query_name)
     except Exception:

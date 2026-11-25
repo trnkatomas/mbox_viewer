@@ -115,7 +115,9 @@ def _thread_records(db: Any, thread_id: Optional[str]) -> List[Dict[str, Any]]:
     return get_one_thread(db, thread_id).to_dict(orient="records")  # type: ignore[return-value]
 
 
-def get_email_with_thread(db: Any, email_id: str) -> Optional[Dict[str, Any]]:
+def get_email_with_thread(
+    db: Any, email_id: str, mbox_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """
     Email metadata, parsed body and thread summary, or None if not found.
 
@@ -127,7 +129,7 @@ def get_email_with_thread(db: Any, email_id: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         email_meta = email_df.to_dict(orient="records")[0]
-        parsed = load_and_parse_email(Email.from_dict(email_meta))
+        parsed = load_and_parse_email(Email.from_dict(email_meta), mbox_path=mbox_path)
         body_type, content = parsed["body"]
         return {
             "email_meta": email_meta,
@@ -142,23 +144,25 @@ def get_email_with_thread(db: Any, email_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_thread_with_emails(db: Any, thread_id: str) -> Optional[List[Dict[str, Any]]]:
+def get_thread_with_emails(
+    db: Any, thread_id: str, mbox_path: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
     """Thread emails oldest-first with parsed content, or None if not found."""
     thread = _thread_records(db, thread_id)
     if not thread:
         return None
-    return enrich_thread_emails(db, thread)
+    return enrich_thread_emails(db, thread, mbox_path)
 
 
 def enrich_thread_emails(
-    db: Any, thread: Sequence[Mapping[Any, Any]]
+    db: Any, thread: Sequence[Mapping[Any, Any]], mbox_path: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Add parsed_body, body_type, attachments and inline_images to each email."""
     enriched_thread = []
     for email_dict in thread:
         enriched: Dict[str, Any] = dict(email_dict)
         try:
-            parsed = load_and_parse_email(Email.from_dict(email_dict))
+            parsed = load_and_parse_email(Email.from_dict(email_dict), mbox_path=mbox_path)
             enriched["body_type"], enriched["parsed_body"] = parsed["body"]
             enriched["attachments"] = parsed["attachments"]
             enriched["inline_images"] = parsed["inline_images"]
@@ -205,7 +209,7 @@ def get_stats_time_series(db: Any, query_name: str) -> List[Dict[str, Any]]:
 
 
 def get_attachment(
-    db: Any, email_id: str, attachment_id: Union[int, str]
+    db: Any, email_id: str, attachment_id: Union[int, str], mbox_path: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
     One attachment with its content, selected by position (int) or filename (str).
@@ -217,7 +221,7 @@ def get_attachment(
         return None
     try:
         email_meta = email_df.to_dict(orient="records")[0]
-        raw = read_mbox_slice(int(email_meta["email_start"]), int(email_meta["email_end"]))
+        raw = read_mbox_slice(int(email_meta["email_start"]), int(email_meta["email_end"]), mbox_path)
         attachments = parse_email(raw)["attachments"]
     except (KeyError, ValueError, OSError) as e:
         logger.error("Failed to retrieve attachment %s: %s", attachment_id, e)

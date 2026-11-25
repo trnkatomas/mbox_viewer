@@ -453,3 +453,29 @@ class TestGetStatsTimeSeriesTool:
         ):
             result = _load_json(get_stats_time_series_tool("unsupported_query"))
             assert result == []
+
+
+class TestSerialisableRealDataTypes:
+    """Rows from DuckDB carry NumPy and pandas types that json can't encode."""
+
+    def test_numpy_and_pandas_values(self):
+        import numpy as np
+        import pandas as pd
+
+        from mcp_server import _serialisable
+
+        row = {
+            "labels": np.array(["Inbox", "Travel"], dtype=object),
+            "has_attachment": np.int64(2),
+            "date": pd.Timestamp("2024-01-01 10:00"),
+            "missing_date": pd.NaT,
+            "dist": float("nan"),
+        }
+        result = _serialisable(row)
+        assert json.loads(json.dumps(result)) == {
+            "labels": ["Inbox", "Travel"],
+            "has_attachment": 2,
+            "date": "2024-01-01T10:00:00",
+            "missing_date": None,
+            "dist": None,
+        }

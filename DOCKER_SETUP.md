@@ -27,9 +27,8 @@ On each start the indexer:
 Create a `.env` file next to `docker-compose.yml`:
 
 ```bash
-MBOX_DIR=/path/to/mail          # directory containing the mbox
-MBOX_FILE=emails.mbox           # file name inside MBOX_DIR
-INDEX_DIR=./index               # where emails.db is kept; must be writable by PUID
+MBOX_DIR=/path/to/mail          # directory with your .mbox files
+INDEX_DIR=./index               # where the indexes are kept; must be writable by PUID
 COMPOSE_PROFILES=rag            # remove to run without Ollama / rag: search
 ```
 
@@ -46,9 +45,9 @@ Open http://localhost:8000 once the indexer has exited.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MBOX_DIR` | `./mbox_files` | Host directory with the mbox, mounted read-only |
-| `MBOX_FILE` | `emails.mbox` | mbox file name inside `MBOX_DIR` |
-| `INDEX_DIR` | `./index` | Host directory for `emails.db` |
+| `MBOX_DIR` | `./mbox_files` | Host directory with the mbox files, mounted read-only. Every `*.mbox` file in it (subfolders included, hidden ones skipped) is a mailbox |
+| `MBOX_FILE` | `emails.mbox` | Optional: the mbox in `MBOX_DIR` whose index is `emails.db` (indexes built before multiple mailboxes were supported keep working) |
+| `INDEX_DIR` | `./index` | Host directory for the indexes, one `<mailbox-id>.db` per mailbox |
 | `PUID` / `PGID` | `1000` | User the containers run as |
 | `COMPOSE_PROFILES` | *(empty)* | `rag` also starts Ollama |
 | `INDEX_EMBEDDINGS` | `auto` | `on` fails when Ollama is unavailable, `off` never embeds, `auto` embeds when Ollama is reachable |
@@ -92,10 +91,12 @@ The viewer has no login. Anyone who can reach port 8000 can read the mail, so
 keep it on a trusted network or put it behind a reverse proxy that adds
 authentication.
 
-To **choose a different mbox**, change `MBOX_FILE_PATH` in both services. The
-index belongs to one specific file (it stores byte offsets), so give each
-mailbox its own index dataset; pointing an existing index at a different file
-makes the indexer rebuild it for the new one.
+**Multiple mailboxes**: every `*.mbox` file in the mail dataset is a mailbox,
+and the viewer's sidebar has a *Mailbox* menu to switch between them. Each
+mailbox has its own index file in the index dataset (named after the file,
+e.g. `work-2024.mbox` → `work-2024.db`). To add one, copy the file into the
+mail dataset and restart the app so the indexer picks it up; until then it is
+listed as *not indexed*.
 
 After **replacing the mbox** with a new export, restart the app: the indexer
 detects the mismatch and rebuilds. If the new export only *appends* to the old
@@ -129,7 +130,8 @@ that owns the datasets.
 ## Manual indexing
 
 ```bash
-docker compose run --rm indexer python email_utils.py index --rebuild   # from scratch
+docker compose run --rm indexer python email_utils.py index --rebuild   # every mailbox, from scratch
+docker compose run --rm indexer python email_utils.py index --mailbox work-2024 --rebuild   # just one
 docker compose run --rm indexer python email_utils.py index --help
 ```
 

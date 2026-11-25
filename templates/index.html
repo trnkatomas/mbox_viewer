@@ -13,6 +13,7 @@
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="/static/sim_script.js"></script>
     <script src="/static/email_frames.js"></script>
+    <script src="/static/mailboxes.js" defer></script>
 
 
     <style>
@@ -32,15 +33,29 @@
         }
     </style>
 </head>
-<body class="bg-gray-100 text-gray-900 h-screen overflow-hidden">
+<body class="bg-gray-100 text-gray-900 h-screen overflow-hidden"
+      {% if current %}data-mailbox="{{ current.id }}" hx-headers='{"X-Mailbox": {{ current.id | tojson }}}'{% endif %}>
 
     <!-- Main Application Grid -->
     <div class="flex h-full">
 
         <!-- 1. Sidebar (Navigation) - Updated for light theme -->
         <aside class="w-16 md:w-64 bg-white border-r border-gray-200 p-5 flex-shrink-0 transition-all duration-300 shadow-md">
-            <div class="mb-10 hidden md:block">
+            <div class="mb-8 hidden md:block">
                 <h1 class="text-2xl font-extrabold text-blue-600">MBox Viewer</h1>
+                {% if mailboxes | length > 1 %}
+                <label for="mailbox-select" class="block mt-4 mb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Mailbox</label>
+                <select id="mailbox-select"
+                        class="w-full rounded-lg border border-gray-300 bg-gray-50 px-2 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500">
+                    {% for m in mailboxes %}
+                    <option value="{{ m.id }}" {% if current and m.id == current.id %}selected{% endif %}>
+                        {{ m.name }}{% if not m.indexed %} (not indexed){% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+                {% elif current %}
+                <p class="mt-2 text-sm text-gray-500 truncate" title="{{ current.mbox_path }}">{{ current.name }}</p>
+                {% endif %}
             </div>
             <nav>
                 <!-- Inbox Link: Targets the inbox layout fragment -->
@@ -86,11 +101,16 @@
         </aside>
 
         <!-- 2. Main Content Area - This entire area is swapped by the simulated server -->
-        <section id="main-content-area" class="flex-grow flex bg-gray-100">
-            <!-- Initial content will be loaded here via JS trigger on DOMContentLoaded -->
+        <section id="main-content-area" class="flex-grow flex bg-gray-100"
+                 {% if current %}hx-get="/api/inbox/layout" hx-trigger="load" hx-swap="innerHTML"{% endif %}>
             <div class="flex-grow flex items-center justify-center text-gray-500 w-full h-full">
                 <div class="text-center p-8">
-                    <p class="text-lg font-medium">Initializing HTMX Application...</p>
+                    {% if current %}
+                    <p class="text-lg font-medium">Loading…</p>
+                    {% else %}
+                    <p class="text-lg font-medium">No mailboxes found</p>
+                    <p class="text-sm mt-1">Set <code>MBOX_DIR</code> to a folder of <code>.mbox</code> files, or <code>MBOX_FILE_PATH</code> to a single file.</p>
+                    {% endif %}
                 </div>
             </div>
         </section>
