@@ -143,17 +143,28 @@ def _attachment_summary(attachment: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _serialisable(obj: Any) -> Any:
-    """Recursively convert non-JSON-serialisable values (e.g. datetimes, bytes)."""
+    """Recursively convert values JSON can't encode (datetimes, bytes, NumPy types, NaN/NaT)."""
     import datetime
+    import math
+
+    import numpy as np
+    import pandas as pd
 
     if isinstance(obj, dict):
         return {k: _serialisable(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple, np.ndarray)):
+        # DuckDB list columns (e.g. labels) arrive as NumPy arrays
         return [_serialisable(v) for v in obj]
+    if obj is pd.NaT:
+        return None
     if isinstance(obj, (datetime.datetime, datetime.date)):
         return obj.isoformat()
     if isinstance(obj, bytes):
         return f"<binary {len(obj)} bytes>"
+    if isinstance(obj, np.generic):
+        obj = obj.item()
+    if isinstance(obj, float) and math.isnan(obj):
+        return None
     return obj
 
 
